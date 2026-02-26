@@ -8,6 +8,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
+import { aiEnv } from "@/lib/config";
 import { julesClient } from "@/lib/jules/client";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
@@ -109,7 +110,9 @@ export async function POST(req: Request) {
 
         try {
           const result = streamText({
-            model: google(AUDITOR_MODEL),
+            model: google(AUDITOR_MODEL, {
+              apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
+            }),
             system:
               "You are the Nexus Auditor, an AI technical lead. Review the coding request, inspect lock state, and produce a safe orchestration decision. Always check lock state before planning. If dispatch is disabled, produce a provisional plan only.",
             prompt: [

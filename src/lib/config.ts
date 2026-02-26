@@ -29,6 +29,10 @@ const julesEnvSchema = z.object({
   JULES_API_BASE_URL: z.string().trim().url(),
 });
 
+const aiEnvSchema = z.object({
+  GOOGLE_GENERATIVE_AI_API_KEY: z.string().trim().min(1),
+});
+
 function validateEnv<T>(schema: z.ZodSchema<T>, env: unknown, name: string): T {
   try {
     return schema.parse(env);
@@ -53,3 +57,4 @@ export const dbEnv = validateEnv(dbEnvSchema, process.env, "Database");
 export const kvEnv = validateEnv(kvEnvSchema, process.env, "KV/RateLimit");
 export const githubEnv = validateEnv(githubEnvSchema, process.env, "GitHub");
 export const julesEnv = validateEnv(julesEnvSchema, process.env, "Jules");
+export const aiEnv = validateEnv(aiEnvSchema, process.env, "AI/Gemini");
