@@ -1,3 +1,4 @@
+import { CascadeEvents } from "@/components/dashboard/cascade-events";
 import { SessionList } from "@/components/dashboard/session-list";
 
 export default function SessionsDashboardPage() {
@@ -9,6 +10,7 @@ export default function SessionsDashboardPage() {
           Monitor live Jules execution and stream Auditor orchestration reports.
         </p>
       </header>
+      <CascadeEvents />
       <SessionList />
     </div>
   );
