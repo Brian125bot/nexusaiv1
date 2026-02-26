@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 
-import { google } from "@ai-sdk/google";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { stepCountIs, streamText, tool } from "ai";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -11,6 +11,10 @@ import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { aiEnv } from "@/lib/config";
 import { julesClient } from "@/lib/jules/client";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
+
+const google = createGoogleGenerativeAI({
+  apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
+});
 
 const AUDITOR_MODEL = "gemini-3.0-flash-preview";
 export const runtime = "nodejs";
@@ -110,9 +114,7 @@ export async function POST(req: Request) {
 
         try {
           const result = streamText({
-            model: google(AUDITOR_MODEL, {
-              apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
-            }),
+            model: google(AUDITOR_MODEL),
             system:
               "You are the Nexus Auditor, an AI technical lead. Review the coding request, inspect lock state, and produce a safe orchestration decision. Always check lock state before planning. If dispatch is disabled, produce a provisional plan only.",
             prompt: [
