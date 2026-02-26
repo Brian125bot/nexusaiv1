@@ -1,6 +1,8 @@
 import { z } from "zod";
 
+import { getAuthenticatedUserId } from "@/lib/auth/session";
 import { syncSessionStatus } from "@/lib/jules/sync-service";
+import { syncRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
 const syncRequestSchema = z
   .object({
@@ -13,6 +15,18 @@ const syncRequestSchema = z
   });
 
 export async function POST(req: Request) {
+  let userId: string;
+  try {
+    userId = await getAuthenticatedUserId(req);
+  } catch {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { success, limit, remaining, reset } = await syncRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   let requestBody: unknown;
 
   try {

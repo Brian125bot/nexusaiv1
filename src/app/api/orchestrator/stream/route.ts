@@ -7,7 +7,9 @@ import { z } from "zod";
 
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
+import { getAuthenticatedUserId } from "@/lib/auth/session";
 import { julesClient } from "@/lib/jules/client";
+import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
 const AUDITOR_MODEL = "gemini-3.0-flash-preview";
 
@@ -25,20 +27,20 @@ const activeSessionStatuses = ["queued", "executing", "verifying"] as const;
 
 type TriggerResult =
   | {
-      ok: true;
-      internalSessionId: string;
-      externalSessionId: string;
-      julesSessionUrl: string;
-      branchName: string;
-      baseBranch: string;
-      message: string;
-    }
+    ok: true;
+    internalSessionId: string;
+    externalSessionId: string;
+    julesSessionUrl: string;
+    branchName: string;
+    baseBranch: string;
+    message: string;
+  }
   | {
-      ok: false;
-      reason: "lock_conflict";
-      conflicts: unknown[];
-      message: string;
-    };
+    ok: false;
+    reason: "lock_conflict";
+    conflicts: unknown[];
+    message: string;
+  };
 
 type DraftPlanResult = {
   ok: true;
@@ -54,6 +56,18 @@ function encodeSseEvent(event: string, data: unknown): string {
 }
 
 export async function POST(req: Request) {
+  let userId: string;
+  try {
+    userId = await getAuthenticatedUserId(req);
+  } catch {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { success, limit, remaining, reset } = await orchestratorRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   let requestBody: unknown;
 
   try {
