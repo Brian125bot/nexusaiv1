@@ -29,7 +29,7 @@ const julesEnvSchema = z.object({
   JULES_API_BASE_URL: z.string().trim().url(),
 });
 
-function validateEnv<T>(schema: z.ZodSchema<T>, env: any, name: string): T {
+function validateEnv<T>(schema: z.ZodSchema<T>, env: unknown, name: string): T {
   try {
     return schema.parse(env);
   } catch (error) {
