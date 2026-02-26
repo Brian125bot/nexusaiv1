@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authMiddleware } from "@descope/nextjs-sdk/server";
-import { authEnv } from "@/lib/config";
 
 const descopeMiddleware = authMiddleware({
-  projectId: authEnv.DESCOPE_PROJECT_ID,
+  projectId: process.env.DESCOPE_PROJECT_ID!,
   redirectUrl: "/sign-in",
   publicRoutes: [
     "/",
