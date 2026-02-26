@@ -16,7 +16,7 @@ const google = createGoogleGenerativeAI({
   apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
 });
 
-const AUDITOR_MODEL = "gemini-3.0-flash-preview";
+const AUDITOR_MODEL = "gemini-3-flash-preview";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 

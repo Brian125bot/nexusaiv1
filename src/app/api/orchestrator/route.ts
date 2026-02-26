@@ -1,17 +1,22 @@
 import { randomUUID } from "crypto";
 
 import { generateText, stepCountIs, tool } from "ai";
-import { google } from "@ai-sdk/google";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
+import { aiEnv } from "@/lib/config";
 import { julesClient } from "@/lib/jules/client";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
-const AUDITOR_MODEL = "gemini-3.0-flash-preview";
+const google = createGoogleGenerativeAI({
+  apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
+});
+
+const AUDITOR_MODEL = "gemini-3-flash-preview";
 
 const requestSchema = z.object({
   goalId: z.string().uuid(),

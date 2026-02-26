@@ -1,13 +1,18 @@
 import { generateObject } from "ai";
-import { google } from "@ai-sdk/google";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
 import { goals, sessions } from "@/db/schema";
+import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
 
-const AUDITOR_MODEL = "gemini-3.0-flash-preview";
+const google = createGoogleGenerativeAI({
+  apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
+});
+
+const AUDITOR_MODEL = "gemini-3-flash-preview";
 const activeSessionStatuses = ["queued", "executing", "verifying"] as const;
 
 const reviewSchema = z.object({
