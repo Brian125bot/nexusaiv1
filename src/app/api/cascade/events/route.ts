@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, like } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
@@ -30,11 +30,11 @@ export async function GET(req: Request) {
   }
 
   try {
-    // Query sessions that have cascade metadata
+    // Query sessions that have cascade metadata - use like pattern since lastError contains JSON
     const cascadeSessions = await db.query.sessions.findMany({
-      where: eq(sessions.lastError, "cascade"),
+      where: like(sessions.lastError, '%"type":"cascade"%'),
       orderBy: [desc(sessions.createdAt)],
-      limit: 20,
+      limit: 50,
     });
 
     // Parse cascade events from session metadata

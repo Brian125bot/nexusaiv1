@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import useSWR from "swr";
 
-import { fetcher, jsonRequest } from "@/lib/ui/fetcher";
+import { fetcher } from "@/lib/ui/fetcher";
 import { swrKeys } from "@/lib/ui/swr-keys";
 
 type CascadeEvent = {
@@ -17,30 +16,13 @@ type CascadeEvent = {
 };
 
 export function CascadeEvents() {
-  const { data, mutate, isLoading } = useSWR<{ cascades: CascadeEvent[] }>(
+  const { data, isLoading } = useSWR<{ cascades: CascadeEvent[] }>(
     swrKeys.cascadeEvents,
     fetcher,
     {
       refreshInterval: 10000,
     },
   );
-
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-
-  const handleManualAnalysis = async () => {
-    setIsAnalyzing(true);
-    try {
-      // This would trigger a scan of recent commits for core file changes
-      await jsonRequest("/api/cascade/scan", {
-        method: "POST",
-      });
-      await mutate();
-    } catch (error) {
-      console.error("Failed to trigger cascade analysis:", error);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
 
   const cascades = data?.cascades ?? [];
 
@@ -53,13 +35,6 @@ export function CascadeEvents() {
             Multi-agent refactoring operations triggered by core file changes
           </p>
         </div>
-        <button
-          onClick={handleManualAnalysis}
-          disabled={isAnalyzing}
-          className="rounded-lg border border-cyan-500 px-4 py-2 text-sm font-semibold text-cyan-200 disabled:opacity-50"
-        >
-          {isAnalyzing ? "Scanning..." : "Scan for Cascades"}
-        </button>
       </div>
 
       {isLoading ? (

@@ -1,3 +1,4 @@
+import { eq, or } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
@@ -154,27 +155,27 @@ export async function POST(req: Request) {
 
       // Try to acquire all locks atomically
       const lockResult = await db.transaction(async (tx) => {
-        // Check for existing locks - use array filtering since drizzle doesn't support .in() on text columns
         const allFilePaths = allFilesToLock.map(l => l.filePath);
-        const existingLocks: { filePath: string; sessionId: string }[] = [];
         
-        // Check each file path individually (less efficient but works with drizzle)
-        for (const filePath of allFilePaths) {
-          const lock = await tx.query.fileLocks.findFirst({
-            where: (locks, { eq }) => eq(locks.filePath, filePath),
-          });
-          if (lock) {
-            existingLocks.push({
-              filePath: lock.filePath,
-              sessionId: lock.sessionId,
-            });
-          }
-        }
+        // Build OR conditions for all file paths in a single query
+        const existingLocksQuery = allFilePaths.length > 0
+          ? tx.select().from(fileLocks).where(
+            allFilePaths.reduce((acc, fp, idx) => {
+              if (idx === 0) return eq(fileLocks.filePath, fp);
+              return or(acc, eq(fileLocks.filePath, fp));
+            }, eq(fileLocks.filePath, allFilePaths[0]))
+          )
+          : [];
+          
+        const existingLocks = await existingLocksQuery;
 
         if (existingLocks.length > 0) {
           return {
             success: false,
-            conflicts: existingLocks,
+            conflicts: existingLocks.map(l => ({
+              filePath: l.filePath,
+              sessionId: l.sessionId,
+            })),
           };
         }
 

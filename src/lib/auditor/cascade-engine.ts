@@ -149,10 +149,10 @@ export async function analyzeCascade(
       },
     });
 
-    // Filter repair jobs by confidence
-    const qualifiedJobs = analysis.repairJobs.filter(
-      (_, idx) => idx < CASCADE_CONFIG.maxParallelAgents,
-    );
+    // Filter repair jobs by confidence and max parallel agents
+    const qualifiedJobs = analysis.repairJobs
+      .filter(job => analysis.confidence >= CASCADE_CONFIG.minConfidenceScore)
+      .slice(0, CASCADE_CONFIG.maxParallelAgents);
 
     return {
       ...analysis,
