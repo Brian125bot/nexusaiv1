@@ -3,11 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 export default async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Define public routes
+  // Define public routes (normalized to remove trailing slashes)
+  const normalizedPath = pathname.endsWith("/") && pathname !== "/" 
+    ? pathname.slice(0, -1) 
+    : pathname;
+
   const isPublicRoute = 
-    pathname === "/" || 
-    pathname === "/sign-in" || 
-    pathname === "/api/webhooks/github";
+    normalizedPath === "/" || 
+    normalizedPath === "/sign-in" || 
+    normalizedPath === "/api/webhooks/github";
 
   if (isPublicRoute) {
     return NextResponse.next();
