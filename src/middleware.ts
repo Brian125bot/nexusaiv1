@@ -1,34 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
-import { authMiddleware } from "@descope/nextjs-sdk/server";
-
-const descopeMiddleware = authMiddleware({
-  projectId: process.env.DESCOPE_PROJECT_ID!,
-  redirectUrl: "/sign-in",
-  publicRoutes: [
-    "/",
-    "/sign-in",
-    "/api/webhooks/github",
-  ],
-});
 
 export default async function middleware(req: NextRequest) {
-  const response = await descopeMiddleware(req);
+  const { pathname } = req.nextUrl;
 
-  if (
-    req.nextUrl.pathname.startsWith("/api/") &&
-    !req.nextUrl.pathname.startsWith("/api/webhooks/github") &&
-    isRedirectResponse(response)
-  ) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Define public routes
+  const isPublicRoute = 
+    pathname === "/" || 
+    pathname === "/sign-in" || 
+    pathname === "/api/webhooks/github";
+
+  if (isPublicRoute) {
+    return NextResponse.next();
   }
 
-  return response;
+  // Check for Descope session cookies (DS or DSR)
+  // This is a lightweight check for the Edge runtime.
+  // Full validation happens in the API routes/Server Components using the Node.js runtime.
+  const hasSession = req.cookies.has("DS") || req.cookies.has("DSR");
+
+  if (!hasSession) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    
+    // Redirect to sign-in for pages
+    const signInUrl = new URL("/sign-in", req.url);
+    return NextResponse.redirect(signInUrl);
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
-
-function isRedirectResponse(response: Response): boolean {
-  return response.status >= 300 && response.status < 400 && response.headers.has("location");
-}
