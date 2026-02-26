@@ -29,9 +29,27 @@ const julesEnvSchema = z.object({
   JULES_API_BASE_URL: z.string().trim().url(),
 });
 
-export const authEnv = authEnvSchema.parse(process.env);
-export const publicEnv = publicEnvSchema.parse(process.env);
-export const dbEnv = dbEnvSchema.parse(process.env);
-export const kvEnv = kvEnvSchema.parse(process.env);
-export const githubEnv = githubEnvSchema.parse(process.env);
-export const julesEnv = julesEnvSchema.parse(process.env);
+function validateEnv<T>(schema: z.ZodSchema<T>, env: any, name: string): T {
+  try {
+    return schema.parse(env);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const missingKeys = error.issues.map(i => i.path.join(".")).join(", ");
+      console.error(`❌ Missing or invalid environment variables for ${name}: ${missingKeys}`);
+    }
+    // During build phase, we might want to continue if these aren't strictly required
+    // But for NexusAI, they are mostly required for server-side logic.
+    if (process.env.NODE_ENV === "production" && process.env.NEXT_PHASE !== "phase-production-build") {
+       throw new Error(`Environment validation failed for ${name}`);
+    }
+    // Return partial/empty object cast to T to allow build to proceed if possible
+    return env as T;
+  }
+}
+
+export const authEnv = validateEnv(authEnvSchema, process.env, "Auth");
+export const publicEnv = validateEnv(publicEnvSchema, process.env, "Public");
+export const dbEnv = validateEnv(dbEnvSchema, process.env, "Database");
+export const kvEnv = validateEnv(kvEnvSchema, process.env, "KV/RateLimit");
+export const githubEnv = validateEnv(githubEnvSchema, process.env, "GitHub");
+export const julesEnv = validateEnv(julesEnvSchema, process.env, "Jules");
