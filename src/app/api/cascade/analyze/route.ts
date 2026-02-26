@@ -1,4 +1,4 @@
-import { eq, or, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
@@ -6,10 +6,10 @@ import { sessions, fileLocks, goals, cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import {
   analyzeCascade,
-  dispatchCascadeRepairs,
   type FileChange,
 } from "@/lib/auditor/cascade-engine";
 import { julesClient } from "@/lib/jules/client";
+import { LockManager } from "@/lib/registry/lock-manager";
 
 export const runtime = "nodejs";
 
@@ -53,6 +53,14 @@ const cascadeResponseSchema = z.object({
     .optional(),
   summary: z.string(),
   confidence: z.number(),
+  telemetry: z
+    .object({
+      dispatchLatencyMs: z.number().int().nonnegative(),
+      conflictCount: z.number().int().nonnegative(),
+      dispatchedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export type CascadeDispatchResult = z.infer<typeof cascadeResponseSchema>;
@@ -92,6 +100,7 @@ export async function POST(req: Request) {
 
   // Generate cascade ID
   const cascadeId = `cascade_${commitSha.slice(0, 8)}_${Date.now()}`;
+  const dispatchStartedAt = Date.now();
 
   try {
     // Step 1: Analyze the blast radius
@@ -154,96 +163,125 @@ export async function POST(req: Request) {
         cascadeGoalId = cascadeGoal.id;
       }
 
-      // Acquire locks for all files in the blast radius
-      const allFilesToLock = analysis.downstreamFiles.flatMap(filePath => {
-        const internalSessionId = `cascade_${cascadeId}_${filePath.replace(/\//g, "_")}`;
-        return {
-          sessionId: internalSessionId,
-          filePath,
-        };
-      });
+      const conflictSet = new Map<string, string>();
+      dispatchedSessions = [];
 
-      // Try to acquire all locks atomically
-      const lockResult = await db.transaction(async (tx) => {
-        const allFilePaths = allFilesToLock.map(l => l.filePath);
-        
-        // Build OR conditions for all file paths in a single query
-        const existingLocksQuery = allFilePaths.length > 0
-          ? tx.select().from(fileLocks).where(inArray(fileLocks.filePath, allFilePaths))
-          : [];
-          
-        const existingLocks = await existingLocksQuery;
+      for (const job of analysis.repairJobs) {
+        const internalSessionId = `cascade_${cascadeId}_${job.id}`;
+        const sessionPrompt = buildCascadeSessionPrompt(job, cascadeId);
 
-        if (existingLocks.length > 0) {
-          return {
-            success: false,
-            conflicts: existingLocks.map(l => ({
-              filePath: l.filePath,
-              sessionId: l.sessionId,
-            })),
-          };
+        await db.insert(sessions).values({
+          id: internalSessionId,
+          goalId: cascadeGoalId,
+          cascadeId,
+          sourceRepo,
+          branchName: branch,
+          baseBranch: branch,
+          status: "queued",
+        });
+
+        const lockResult = await LockManager.acquireLocks(internalSessionId, job.files);
+        if (!lockResult.ok) {
+          const conflictMessage = `Lock conflict on ${lockResult.conflicts.map((conflict) => conflict.filePath).join(", ")}`;
+          await db
+            .update(sessions)
+            .set({
+              status: "failed",
+              lastError: conflictMessage,
+              lastSyncedAt: new Date(),
+            })
+            .where(eq(sessions.id, internalSessionId));
+
+          lockResult.conflicts.forEach((conflict) => {
+            conflictSet.set(conflict.filePath, conflict.sessionId);
+          });
+
+          dispatchedSessions.push({
+            jobId: job.id,
+            sessionId: "",
+            status: "conflict",
+          });
+          continue;
         }
 
-        // Acquire all locks
-        await tx.insert(fileLocks).values(allFilesToLock);
+        try {
+          const createdSession = await julesClient.createSession({
+            prompt: sessionPrompt,
+            sourceRepo,
+            startingBranch: branch,
+            auditorContext: `cascade:${cascadeId};job:${job.id};files:${job.files.join(",")}`,
+          });
 
-        return {
-          success: true,
-          conflicts: [],
-        };
-      });
+          await db
+            .update(sessions)
+            .set({
+              status: "executing",
+              externalSessionId: createdSession.id,
+              julesSessionUrl: createdSession.url,
+              lastError: null,
+              lastSyncedAt: new Date(),
+            })
+            .where(eq(sessions.id, internalSessionId));
 
-      if (!lockResult.success) {
-        console.warn(
-          `⚠️ Nexus: Cascade dispatch blocked by ${lockResult.conflicts.length} file lock conflicts`,
-        );
-        
-        await db.update(cascades).set({ status: "failed" }).where(eq(cascades.id, cascadeId));
+          dispatchedSessions.push({
+            jobId: job.id,
+            sessionId: createdSession.id,
+            status: "dispatched",
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          await db
+            .update(sessions)
+            .set({
+              status: "failed",
+              lastError: `failed: ${message}`,
+              lastSyncedAt: new Date(),
+            })
+            .where(eq(sessions.id, internalSessionId));
+          await db.delete(fileLocks).where(eq(fileLocks.sessionId, internalSessionId));
+          dispatchedSessions.push({
+            jobId: job.id,
+            sessionId: "",
+            status: `failed: ${message}`,
+          });
+        }
+      }
 
+      const dispatchedCount = dispatchedSessions.filter((session) => session.status === "dispatched").length;
+      const failedCount = dispatchedSessions.filter(
+        (session) => session.status === "conflict" || session.status.startsWith("failed"),
+      ).length;
+      const telemetry = {
+        dispatchLatencyMs: Date.now() - dispatchStartedAt,
+        conflictCount: conflictSet.size,
+        dispatchedCount,
+        failedCount,
+      };
+      await db
+        .update(cascades)
+        .set({ status: dispatchedCount > 0 ? "dispatched" : "failed" })
+        .where(eq(cascades.id, cascadeId));
+
+      console.log(
+        `✅ Nexus: Cascade dispatch complete - ${dispatchedCount}/${dispatchedSessions.length} sessions started (conflicts=${telemetry.conflictCount}, latencyMs=${telemetry.dispatchLatencyMs})`,
+      );
+
+      if (dispatchedCount === 0 && conflictSet.size > 0) {
         return Response.json(
           {
             error: "File lock conflicts detected",
-            conflicts: lockResult.conflicts,
+            conflicts: Array.from(conflictSet.entries()).map(([filePath, sessionId]) => ({
+              filePath,
+              sessionId,
+            })),
             cascadeId,
             isCascade: true,
+            dispatchedSessions,
+            telemetry,
           },
           { status: 409 },
         );
       }
-
-      // Dispatch all repair sessions in parallel
-      dispatchedSessions = await dispatchCascadeRepairs(
-        sourceRepo,
-        branch,
-        cascadeId,
-        analysis.repairJobs,
-      );
-
-      // Create session records in database
-      await Promise.all(
-        dispatchedSessions.map(async (sessionResult) => {
-          const job = analysis.repairJobs.find(j => j.id === sessionResult.jobId);
-          if (!job) return;
-
-          await db.insert(sessions).values({
-            id: `cascade_${cascadeId}_${job.id}`,
-            goalId: cascadeGoalId,
-            cascadeId,
-            sourceRepo,
-            branchName: branch,
-            baseBranch: branch,
-            status: sessionResult.status === "dispatched" ? "executing" : "failed",
-            externalSessionId: sessionResult.sessionId || undefined,
-            lastError: sessionResult.status.startsWith("failed") ? sessionResult.status : null,
-          });
-        }),
-      );
-      
-      await db.update(cascades).set({ status: "dispatched" }).where(eq(cascades.id, cascadeId));
-
-      console.log(
-        `✅ Nexus: Cascade dispatch complete - ${dispatchedSessions.filter(s => s.status === "dispatched").length}/${dispatchedSessions.length} sessions started`,
-      );
     }
 
     return Response.json({
@@ -255,6 +293,20 @@ export async function POST(req: Request) {
       dispatchedSessions,
       summary: analysis.summary,
       confidence: analysis.confidence,
+      telemetry:
+        autoDispatch && dispatchedSessions
+          ? {
+              dispatchLatencyMs: Date.now() - dispatchStartedAt,
+              conflictCount: dispatchedSessions.filter((session) => session.status === "conflict")
+                .length,
+              dispatchedCount: dispatchedSessions.filter((session) => session.status === "dispatched")
+                .length,
+              failedCount: dispatchedSessions.filter(
+                (session) =>
+                  session.status === "conflict" || session.status.startsWith("failed"),
+              ).length,
+            }
+          : undefined,
     });
   } catch (error) {
     console.error("❌ Nexus: Cascade analysis failed:", error);
@@ -267,4 +319,30 @@ export async function POST(req: Request) {
       { status: 500 },
     );
   }
+}
+
+function buildCascadeSessionPrompt(
+  job: { id: string; files: string[]; prompt: string; priority: string; estimatedImpact: string },
+  cascadeId: string,
+): string {
+  return [
+    "## Cascade Repair Task",
+    "",
+    `**Cascade ID:** ${cascadeId}`,
+    `**Job ID:** ${job.id}`,
+    `**Priority:** ${job.priority.toUpperCase()}`,
+    `**Estimated Impact:** ${job.estimatedImpact}`,
+    "",
+    "### Files to Repair",
+    ...job.files.map((file) => `- ${file}`),
+    "",
+    "### Repair Instructions",
+    job.prompt,
+    "",
+    "### Constraints",
+    "- Only modify the files listed above",
+    "- Ensure all imports and type references are updated correctly",
+    "- Run tests if available",
+    "- Create a single PR with all changes",
+  ].join("\n");
 }

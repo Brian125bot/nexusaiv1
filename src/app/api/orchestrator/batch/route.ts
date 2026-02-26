@@ -1,11 +1,13 @@
 import { randomUUID } from "crypto";
 
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { fileLocks, sessions, goals } from "@/db/schema";
+import { cascades, fileLocks, sessions, goals } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { julesClient } from "@/lib/jules/client";
+import { LockManager } from "@/lib/registry/lock-manager";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -42,7 +44,7 @@ const batchDispatchResponseSchema = z.object({
     z.object({
       jobId: z.string(),
       sessionId: z.string(),
-      sessionUrl: z.string().url(),
+      sessionUrl: z.string(),
       status: z.string(),
       lockedFiles: z.array(z.string()),
     }),
@@ -54,6 +56,14 @@ const batchDispatchResponseSchema = z.object({
         existingSessionId: z.string(),
       }),
     )
+    .optional(),
+  telemetry: z
+    .object({
+      dispatchLatencyMs: z.number().int().nonnegative(),
+      conflictCount: z.number().int().nonnegative(),
+      dispatchedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+    })
     .optional(),
 });
 
@@ -97,65 +107,10 @@ export async function POST(req: Request) {
 
   const { sourceRepo, baseBranch, cascadeId, jobs, goalId } = parsed.data;
   const batchId = `batch_${randomUUID()}`;
+  const dispatchStartedAt = Date.now();
 
   try {
-    // Step 1: Collect all files that need to be locked
-    const allFilesToLock = new Set<string>();
-    for (const job of jobs) {
-      for (const file of job.files) {
-        allFilesToLock.add(file);
-      }
-    }
-
-    const lockEntries = Array.from(allFilesToLock).map(filePath => ({
-      sessionId: `cascade_${cascadeId}_${filePath.replace(/\//g, "_")}`,
-      filePath,
-    }));
-
-    // Step 2: Try to acquire all locks atomically
-    const lockResult = await db.transaction(async (tx) => {
-      // Check for existing locks - use array filtering since drizzle doesn't support .in() on text columns
-      const allFilePaths = Array.from(allFilesToLock);
-      const existingLocks: { filePath: string; sessionId: string }[] = [];
-      
-      // Check each file path individually (less efficient but works with drizzle)
-      for (const filePath of allFilePaths) {
-        const lock = await tx.query.fileLocks.findFirst({
-          where: (locks, { eq }) => eq(locks.filePath, filePath),
-        });
-        if (lock) {
-          existingLocks.push({
-            filePath: lock.filePath,
-            sessionId: lock.sessionId,
-          });
-        }
-      }
-
-      // Acquire all locks
-      await tx.insert(fileLocks).values(lockEntries);
-
-      return {
-        success: true,
-        conflicts: [],
-      };
-    });
-
-    if (!lockResult.success) {
-      console.warn(
-        `⚠️ Nexus: Batch dispatch blocked by ${lockResult.conflicts.length} file lock conflicts`,
-      );
-      return Response.json(
-        {
-          error: "File lock conflicts detected",
-          conflicts: lockResult.conflicts,
-          batchId,
-          cascadeId,
-        },
-        { status: 409 },
-      );
-    }
-
-    // Step 3: Create or get parent goal for cascade
+    // Step 1: Create or get parent goal for cascade
     let cascadeGoalId = goalId;
     if (!cascadeGoalId) {
       const [cascadeGoal] = await db
@@ -174,10 +129,56 @@ export async function POST(req: Request) {
       cascadeGoalId = cascadeGoal.id;
     }
 
-    // Step 4: Dispatch all Jules sessions in parallel
-    const sessionPromises = jobs.map(async (job) => {
+    await db
+      .insert(cascades)
+      .values({
+        id: cascadeId,
+        repairJobCount: jobs.length,
+        summary: `Batch dispatch ${batchId}`,
+        status: "analyzing",
+      })
+      .onConflictDoNothing();
+
+    // Step 2: Dispatch all Jules sessions
+    const conflictMap = new Map<string, string>();
+    const sessionResults = await Promise.all(jobs.map(async (job) => {
+      const internalSessionId = `cascade_${cascadeId}_${job.id}`;
       try {
         const sessionPrompt = buildCascadeSessionPrompt(job, cascadeId);
+        await db.insert(sessions).values({
+          id: internalSessionId,
+          goalId: cascadeGoalId,
+          cascadeId,
+          sourceRepo,
+          branchName: baseBranch,
+          baseBranch,
+          status: "queued",
+        });
+
+        const lockResult = await LockManager.acquireLocks(internalSessionId, job.files);
+        if (!lockResult.ok) {
+          const conflictMessage = `Lock conflict on ${lockResult.conflicts.map((conflict) => conflict.filePath).join(", ")}`;
+          await db
+            .update(sessions)
+            .set({
+              status: "failed",
+              lastError: conflictMessage,
+              lastSyncedAt: new Date(),
+            })
+            .where(eq(sessions.id, internalSessionId));
+
+          lockResult.conflicts.forEach((conflict) => {
+            conflictMap.set(conflict.filePath, conflict.sessionId);
+          });
+
+          return {
+            jobId: job.id,
+            sessionId: "",
+            sessionUrl: "",
+            status: "conflict",
+            lockedFiles: job.files,
+          };
+        }
 
         const session = await julesClient.createSession({
           prompt: sessionPrompt,
@@ -186,18 +187,16 @@ export async function POST(req: Request) {
           auditorContext: `cascade:${cascadeId};batch:${batchId};job:${job.id};files:${job.files.join(",")}`,
         });
 
-        // Create session record in database
-        await db.insert(sessions).values({
-          id: `cascade_${cascadeId}_${job.id}`,
-          goalId: cascadeGoalId,
-          sourceRepo,
-          branchName: baseBranch,
-          baseBranch,
-          status: "executing",
-          externalSessionId: session.id,
-          julesSessionUrl: session.url,
-          lastError: null,
-        });
+        await db
+          .update(sessions)
+          .set({
+            status: "executing",
+            externalSessionId: session.id,
+            julesSessionUrl: session.url,
+            lastError: null,
+            lastSyncedAt: new Date(),
+          })
+          .where(eq(sessions.id, internalSessionId));
 
         return {
           jobId: job.id,
@@ -208,23 +207,70 @@ export async function POST(req: Request) {
         };
       } catch (error) {
         console.error(`❌ Nexus: Failed to dispatch job ${job.id}:`, error);
+        const message = error instanceof Error ? error.message : "Unknown error";
+        await db
+          .update(sessions)
+          .set({
+            status: "failed",
+            lastError: `failed: ${message}`,
+            lastSyncedAt: new Date(),
+          })
+          .where(eq(sessions.id, internalSessionId));
+        await db.delete(fileLocks).where(eq(fileLocks.sessionId, internalSessionId));
         return {
           jobId: job.id,
           sessionId: "",
           sessionUrl: "",
-          status: `failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+          status: `failed: ${message}`,
           lockedFiles: job.files,
         };
       }
-    });
-
-    const sessionResults = await Promise.all(sessionPromises);
+    }));
 
     const dispatchedCount = sessionResults.filter(s => s.status === "dispatched").length;
-    const failedCount = sessionResults.filter(s => s.status.startsWith("failed")).length;
+    const failedCount = sessionResults.filter(
+      (session) => session.status.startsWith("failed") || session.status === "conflict",
+    ).length;
+
+    await db
+      .update(cascades)
+      .set({ status: dispatchedCount > 0 ? "dispatched" : "failed" })
+      .where(eq(cascades.id, cascadeId));
 
     console.log(
       `✅ Nexus: Batch dispatch ${batchId} complete - ${dispatchedCount}/${jobs.length} sessions started`,
+    );
+
+    const lockConflicts = Array.from(conflictMap.entries()).map(([filePath, existingSessionId]) => ({
+      filePath,
+      existingSessionId,
+    }));
+    const telemetry = {
+      dispatchLatencyMs: Date.now() - dispatchStartedAt,
+      conflictCount: lockConflicts.length,
+      dispatchedCount,
+      failedCount,
+    };
+
+    if (dispatchedCount === 0 && lockConflicts.length > 0) {
+      return Response.json(
+        {
+          error: "File lock conflicts detected",
+          batchId,
+          cascadeId,
+          totalJobs: jobs.length,
+          dispatchedCount,
+          failedCount,
+          sessions: sessionResults,
+          lockConflicts,
+          telemetry,
+        },
+        { status: 409 },
+      );
+    }
+
+    console.log(
+      `📊 Nexus: Batch telemetry ${batchId} (conflicts=${telemetry.conflictCount}, failed=${telemetry.failedCount}, latencyMs=${telemetry.dispatchLatencyMs})`,
     );
 
     return Response.json({
@@ -234,6 +280,8 @@ export async function POST(req: Request) {
       dispatchedCount,
       failedCount,
       sessions: sessionResults,
+      lockConflicts: lockConflicts.length > 0 ? lockConflicts : undefined,
+      telemetry,
     });
   } catch (error) {
     console.error("❌ Nexus: Batch dispatch failed:", error);
