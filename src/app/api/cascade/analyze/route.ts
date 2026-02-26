@@ -1,8 +1,8 @@
-import { eq, or } from "drizzle-orm";
+import { eq, or, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { sessions, fileLocks, goals } from "@/db/schema";
+import { sessions, fileLocks, goals, cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import {
   analyzeCascade,
@@ -114,6 +114,16 @@ export async function POST(req: Request) {
       `🌊 Nexus: Cascade detected - ${analysis.coreFilesChanged.length} core files, ${analysis.repairJobs.length} repair jobs`,
     );
 
+    // Record the cascade in the database
+    await db.insert(cascades).values({
+      id: cascadeId,
+      coreFilesChanged: analysis.coreFilesChanged,
+      downstreamFiles: analysis.downstreamFiles,
+      repairJobCount: analysis.repairJobs.length,
+      summary: analysis.summary,
+      status: "analyzing",
+    }).onConflictDoNothing();
+
     // Step 2: Optionally dispatch repair sessions
     let dispatchedSessions: Array<{ jobId: string; sessionId: string; status: string }> | undefined;
 
@@ -159,12 +169,7 @@ export async function POST(req: Request) {
         
         // Build OR conditions for all file paths in a single query
         const existingLocksQuery = allFilePaths.length > 0
-          ? tx.select().from(fileLocks).where(
-            allFilePaths.reduce((acc, fp, idx) => {
-              if (idx === 0) return eq(fileLocks.filePath, fp);
-              return or(acc, eq(fileLocks.filePath, fp));
-            }, eq(fileLocks.filePath, allFilePaths[0]))
-          )
+          ? tx.select().from(fileLocks).where(inArray(fileLocks.filePath, allFilePaths))
           : [];
           
         const existingLocks = await existingLocksQuery;
@@ -192,6 +197,9 @@ export async function POST(req: Request) {
         console.warn(
           `⚠️ Nexus: Cascade dispatch blocked by ${lockResult.conflicts.length} file lock conflicts`,
         );
+        
+        await db.update(cascades).set({ status: "failed" }).where(eq(cascades.id, cascadeId));
+
         return Response.json(
           {
             error: "File lock conflicts detected",
@@ -220,6 +228,7 @@ export async function POST(req: Request) {
           await db.insert(sessions).values({
             id: `cascade_${cascadeId}_${job.id}`,
             goalId: cascadeGoalId,
+            cascadeId,
             sourceRepo,
             branchName: branch,
             baseBranch: branch,
@@ -229,6 +238,8 @@ export async function POST(req: Request) {
           });
         }),
       );
+      
+      await db.update(cascades).set({ status: "dispatched" }).where(eq(cascades.id, cascadeId));
 
       console.log(
         `✅ Nexus: Cascade dispatch complete - ${dispatchedSessions.filter(s => s.status === "dispatched").length}/${dispatchedSessions.length} sessions started`,

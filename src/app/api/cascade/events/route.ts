@@ -1,8 +1,8 @@
-import { desc, like } from "drizzle-orm";
+import { desc } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { sessions } from "@/db/schema";
+import { cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 
 export const runtime = "nodejs";
@@ -30,43 +30,23 @@ export async function GET(req: Request) {
   }
 
   try {
-    // Query sessions that have cascade metadata - use like pattern since lastError contains JSON
-    const cascadeSessions = await db.query.sessions.findMany({
-      where: like(sessions.lastError, '%"type":"cascade"%'),
-      orderBy: [desc(sessions.createdAt)],
+    const recentCascades = await db.query.cascades.findMany({
+      orderBy: [desc(cascades.createdAt)],
       limit: 50,
     });
 
-    // Parse cascade events from session metadata
-    const cascades = cascadeSessions
-      .filter((session) => session.lastError && session.lastError.startsWith('{"type":"cascade"'))
-      .map((session) => {
-        try {
-          const cascadeData = JSON.parse(session.lastError || "{}");
-          if (cascadeData.type !== "cascade") return null;
-
-          return {
-            cascadeId: session.id.replace(/_.*/, "_cascade"),
-            isCascade: true,
-            coreFilesChanged: cascadeData.data?.coreFilesChanged || [],
-            downstreamFiles: cascadeData.data?.downstreamFiles || [],
-            repairJobCount: cascadeData.data?.repairJobs?.length || 0,
-            status: session.status === "executing" ? "dispatched" : session.status === "failed" ? "failed" : "completed",
-            createdAt: session.createdAt.getTime(),
-          };
-        } catch {
-          return null;
-        }
-      })
-      .filter((c): c is NonNullable<typeof c> => c !== null);
-
-    // Deduplicate by cascadeId
-    const uniqueCascades = Array.from(
-      new Map(cascades.map((c) => [c.cascadeId, c])).values(),
-    );
+    const formattedCascades = recentCascades.map((cascade) => ({
+      cascadeId: cascade.id,
+      isCascade: true,
+      coreFilesChanged: cascade.coreFilesChanged,
+      downstreamFiles: cascade.downstreamFiles,
+      repairJobCount: cascade.repairJobCount,
+      status: cascade.status,
+      createdAt: cascade.createdAt.getTime(),
+    }));
 
     return Response.json({
-      cascades: uniqueCascades,
+      cascades: formattedCascades,
     });
   } catch (error) {
     console.error("Failed to fetch cascade events:", error);

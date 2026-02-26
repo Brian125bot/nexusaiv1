@@ -79,25 +79,25 @@ export async function DELETE(req: Request) {
       );
     }
 
-    let deletedCount = 0;
+    let deletedRecords: any[] = [];
     
     if (filePath) {
-      deletedCount = await db
+      deletedRecords = await db
         .delete(fileLocks)
         .where(eq(fileLocks.filePath, filePath))
         .returning();
     } else if (sessionId) {
-      deletedCount = await db
+      deletedRecords = await db
         .delete(fileLocks)
         .where(eq(fileLocks.sessionId, sessionId))
         .returning();
     }
 
-    console.log(`🔓 Nexus: Released ${deletedCount.length} lock(s)`);
+    console.log(`🔓 Nexus: Released ${deletedRecords.length} lock(s)`);
 
     return Response.json({
       success: true,
-      releasedCount: deletedCount.length,
+      releasedCount: deletedRecords.length,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to release lock";

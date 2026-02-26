@@ -4,7 +4,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { goals, sessions } from "@/db/schema";
+import { goals, sessions, cascades } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
 import { analyzeCascade, detectCoreFileChanges, type FileChange } from "@/lib/auditor/cascade-engine";
@@ -195,12 +195,23 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     await githubClient.postCommitComment(input.owner, input.repo, input.sha, finalComment);
   }
 
+  if (cascadeResult.isCascade) {
+    const cascadeId = `${session.id}-cascade`;
+    await db.insert(cascades).values({
+      id: cascadeId,
+      triggerSessionId: session.id,
+      coreFilesChanged: cascadeResult.coreFilesChanged,
+      downstreamFiles: cascadeResult.downstreamFiles,
+      repairJobCount: cascadeResult.repairJobs.length,
+      summary: cascadeResult.summary,
+      status: "analyzing",
+    }).onConflictDoNothing();
+  }
+
   await db
     .update(sessions)
     .set({ 
       lastReviewedCommit: input.sha,
-      // Store cascade metadata for UI display
-      lastError: cascadeResult.isCascade ? JSON.stringify({ type: "cascade", data: cascadeResult }) : null,
     })
     .where(eq(sessions.id, session.id));
 
