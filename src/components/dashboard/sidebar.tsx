@@ -17,7 +17,9 @@ export function Sidebar() {
   const sdk = useDescope();
 
   const handleLogout = useCallback(async () => {
+    console.log("🚪 Nexus: Initiating logout...");
     await sdk.logout();
+    console.log("🚪 Nexus: Logout complete, redirecting to sign-in");
     router.push("/sign-in");
   }, [sdk, router]);
 
@@ -44,11 +46,27 @@ export function Sidebar() {
             );
           })}
         </div>
-        
+
         <button
           onClick={handleLogout}
-          className="mt-auto block w-full rounded-lg px-3 py-2 text-left text-sm text-slate-400 transition hover:bg-red-500/10 hover:text-red-400"
+          className="mt-auto flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:bg-red-500/10 hover:text-red-400"
+          aria-label="Logout"
         >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
           Logout
         </button>
       </nav>
