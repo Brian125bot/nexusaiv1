@@ -1,12 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { GoalManager } from "./goal-manager";
 import { db } from "@/db";
-import { goals } from "@/db/schema";
-
-interface AcceptanceCriterion {
-  text: string;
-  met: boolean;
-}
+import { goals, type AcceptanceCriterion } from "@/db/schema";
 
 describe("GoalManager", () => {
   beforeAll(async () => {

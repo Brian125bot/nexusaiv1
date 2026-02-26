@@ -1,11 +1,6 @@
 import { db } from "@/db";
-import { goals } from "@/db/schema";
+import { goals, type AcceptanceCriterion } from "@/db/schema";
 import { eq } from "drizzle-orm";
-
-interface AcceptanceCriterion {
-  text: string;
-  met: boolean;
-}
 
 export class GoalManager {
   /**

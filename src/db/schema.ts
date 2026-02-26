@@ -3,11 +3,16 @@ import { pgTable, uuid, text, serial, timestamp, jsonb, pgEnum } from "drizzle-o
 export const goalStatusEnum = pgEnum("goal_status", ["backlog", "in-progress", "completed", "drifted"]);
 export const sessionStatusEnum = pgEnum("session_status", ["queued", "executing", "verifying", "completed", "failed"]);
 
+export interface AcceptanceCriterion {
+  text: string;
+  met: boolean;
+}
+
 export const goals = pgTable("goals", {
   id: uuid("id").primaryKey().defaultRandom(),
   title: text("title").notNull(),
   description: text("description"),
-  acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().default([]).notNull(),
+  acceptanceCriteria: jsonb("acceptance_criteria").$type<(string | AcceptanceCriterion)[]>().default([]).notNull(),
   reviewArtifacts: jsonb("review_artifacts")
     .$type<Array<{ type: "pull_request"; url: string; sessionExternalId: string; createdAt: string }>>()
     .default([])
