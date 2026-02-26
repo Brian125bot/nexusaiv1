@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { LockManager } from "./lock-manager";
 import { db } from "@/db";
-import { sessions, fileLocks } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { fileLocks, sessions } from "@/db/schema";
 
 describe("LockManager", () => {
   const TEST_SESSION_1 = "test-session-1";

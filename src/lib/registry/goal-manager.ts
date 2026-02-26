@@ -2,6 +2,11 @@ import { db } from "@/db";
 import { goals } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
+interface AcceptanceCriterion {
+  text: string;
+  met: boolean;
+}
+
 export class GoalManager {
   /**
    * Creates a new architectural goal.
@@ -51,13 +56,15 @@ export class GoalManager {
     // Wait, the spec says "JSONB Array". 
     // I'll assume it's an array of objects { description: string, completed: boolean }
     
-    const criteria = goal.acceptanceCriteria as any[];
-    if (criteria[criteriaIndex]) {
-       if (typeof criteria[criteriaIndex] === 'string') {
+    const criteria = (goal.acceptanceCriteria as (string | AcceptanceCriterion)[]) || [];
+    const item = criteria[criteriaIndex];
+
+    if (item !== undefined) {
+       if (typeof item === 'string') {
            // Upgrade string to object if necessary
-           criteria[criteriaIndex] = { text: criteria[criteriaIndex], met: isMet };
+           criteria[criteriaIndex] = { text: item, met: isMet };
        } else {
-           criteria[criteriaIndex].met = isMet;
+           item.met = isMet;
        }
     }
 

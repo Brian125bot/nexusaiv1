@@ -3,6 +3,11 @@ import { GoalManager } from "./goal-manager";
 import { db } from "@/db";
 import { goals } from "@/db/schema";
 
+interface AcceptanceCriterion {
+  text: string;
+  met: boolean;
+}
+
 describe("GoalManager", () => {
   beforeAll(async () => {
     await db.delete(goals);
@@ -34,10 +39,12 @@ describe("GoalManager", () => {
     await GoalManager.updateGoalProgress(goalId, 0, true);
     
     const updatedGoal = await GoalManager.getGoal(goalId);
-    const updatedCriteria = updatedGoal?.acceptanceCriteria as any[];
+    const updatedCriteria = updatedGoal?.acceptanceCriteria as (string | AcceptanceCriterion)[];
+    const firstItem = updatedCriteria[0];
     
     // Check if it was converted to an object or handled correctly
-    expect(updatedCriteria[0].met).toBe(true);
-    expect(updatedCriteria[0].text).toBe("Criteria 1");
+    expect(typeof firstItem).toBe("object");
+    expect((firstItem as AcceptanceCriterion).met).toBe(true);
+    expect((firstItem as AcceptanceCriterion).text).toBe("Criteria 1");
   });
 });

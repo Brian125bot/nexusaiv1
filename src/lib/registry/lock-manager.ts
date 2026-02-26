@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
-import { eq, inArray, and } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 export class LockManager {
   /**
