@@ -6,6 +6,7 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
+    "db:push": "drizzle-kit push",
     "lint": "eslint",
     "test": "vitest run"
   },

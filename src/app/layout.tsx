@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import { AuthProvider } from "@descope/nextjs-sdk";
+import { publicEnv } from "@/lib/config";
 import "./globals.css";
 
 const headingFont = Space_Grotesk({
@@ -27,7 +28,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${headingFont.variable} ${monoFont.variable} antialiased`}>
-        <AuthProvider projectId={process.env.NEXT_PUBLIC_DESCOPE_PROJECT_ID!}>
+        <AuthProvider projectId={publicEnv.NEXT_PUBLIC_DESCOPE_PROJECT_ID}>
           {children}
         </AuthProvider>
       </body>

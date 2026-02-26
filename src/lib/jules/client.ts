@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { julesEnv } from "@/lib/config";
 
 const createSessionResponseSchema = z.object({
   id: z.string().min(1),
@@ -30,15 +31,6 @@ export type JulesCreateSessionInput = {
 
 export type JulesSession = z.infer<typeof getSessionResponseSchema>;
 
-function getEnv(name: "JULES_API_KEY" | "JULES_API_BASE_URL"): string {
-  const value = process.env[name];
-  if (!value || value.trim().length === 0) {
-    throw new Error(`${name} is not set`);
-  }
-
-  return value;
-}
-
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
@@ -46,8 +38,8 @@ function joinUrl(baseUrl: string, path: string): string {
 export class JulesClient {
   private getConfig() {
     return {
-      apiKey: getEnv("JULES_API_KEY"),
-      baseUrl: getEnv("JULES_API_BASE_URL"),
+      apiKey: julesEnv.JULES_API_KEY,
+      baseUrl: julesEnv.JULES_API_BASE_URL,
     };
   }
 

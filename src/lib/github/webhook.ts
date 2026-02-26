@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "crypto";
+import { githubEnv } from "@/lib/config";
 
 export function computeGitHubSignature(rawBody: string, secret: string): string {
   return `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
@@ -21,11 +22,5 @@ export function verifyGitHubSignature(rawBody: string, signatureHeader: string |
 }
 
 export function getRequiredEnv(name: "GITHUB_WEBHOOK_SECRET" | "GITHUB_TOKEN"): string {
-  const value = process.env[name];
-
-  if (!value || value.trim().length === 0) {
-    throw new Error(`${name} is not set`);
-  }
-
-  return value;
+  return githubEnv[name];
 }

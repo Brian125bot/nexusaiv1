@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { getAuthenticatedUserId } from "@/lib/auth/session";
+import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { syncSessionStatus } from "@/lib/jules/sync-service";
 import { syncRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
@@ -17,9 +17,9 @@ const syncBatchSchema = z
 export async function POST(req: Request) {
   let userId: string;
   try {
-    userId = await getAuthenticatedUserId(req);
-  } catch {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
+    userId = await validateUser(req);
+  } catch (error) {
+    return authErrorResponse(error);
   }
 
   const { success, limit, remaining, reset } = await syncRatelimit.limit(userId);

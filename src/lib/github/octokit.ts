@@ -1,13 +1,8 @@
 import { Octokit } from "@octokit/rest";
+import { githubEnv } from "@/lib/config";
 
 function getGitHubToken(): string {
-  const token = process.env.GITHUB_TOKEN;
-
-  if (!token || token.trim().length === 0) {
-    throw new Error("GITHUB_TOKEN is not set");
-  }
-
-  return token;
+  return githubEnv.GITHUB_TOKEN;
 }
 
 export class GitHubClient {

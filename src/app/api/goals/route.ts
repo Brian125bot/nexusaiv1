@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { db } from "@/db";
 import { goals } from "@/db/schema";
+import { authErrorResponse, validateUser } from "@/lib/auth/session";
+import { apiRatelimit, rateLimitExceededResponse, writeRatelimit } from "@/lib/rate-limit";
 
 const createGoalSchema = z.object({
   title: z.string().trim().min(1),
@@ -11,7 +13,19 @@ const createGoalSchema = z.object({
   status: z.enum(["backlog", "in-progress", "completed", "drifted"]).optional(),
 });
 
-export async function GET() {
+export async function GET(req: Request) {
+  let userId: string;
+  try {
+    userId = await validateUser(req);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+
+  const { success, limit, remaining, reset } = await apiRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   try {
     const data = await db.select().from(goals).orderBy(desc(goals.createdAt));
     return Response.json({ goals: data });
@@ -22,6 +36,18 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  let userId: string;
+  try {
+    userId = await validateUser(req);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+
+  const { success, limit, remaining, reset } = await writeRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   let requestBody: unknown;
 
   try {

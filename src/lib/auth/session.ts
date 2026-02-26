@@ -1,8 +1,23 @@
 import { createSdk } from "@descope/nextjs-sdk/server";
+import { authEnv } from "@/lib/config";
 
 const sdk = createSdk({
-    projectId: process.env.DESCOPE_PROJECT_ID!,
+  projectId: authEnv.DESCOPE_PROJECT_ID,
 });
+
+class UnauthorizedError extends Error {
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+class ForbiddenError extends Error {
+  constructor(message = "Forbidden") {
+    super(message);
+    this.name = "ForbiddenError";
+  }
+}
 
 /**
  * Extract and validate the Descope session from a request.
@@ -11,31 +26,59 @@ const sdk = createSdk({
  * Throws if the session is invalid or missing.
  */
 export async function getAuthenticatedUserId(req: Request): Promise<string> {
-    // The Descope middleware sets a session cookie, but it also
-    // forwards the session token as a Bearer header for API calls.
-    const cookieHeader = req.headers.get("cookie") ?? "";
-    const authHeader = req.headers.get("authorization") ?? "";
+  const { userId } = await getValidatedIdentity(req);
+  return userId;
+}
 
-    // Try Bearer token first (programmatic clients), then fall back to cookie
-    const token =
-        authHeader.replace(/^Bearer\s+/i, "").trim() ||
-        extractCookieValue(cookieHeader, "DS") ||
-        extractCookieValue(cookieHeader, "DSR");
+export async function validateUser(req: Request): Promise<string> {
+  const identity = await getValidatedIdentity(req);
+  const allowedEmail = authEnv.ALLOWED_USER_EMAIL?.toLowerCase();
 
-    if (!token) {
-        throw new Error("No session token found");
-    }
+  const isAllowedUserId = identity.userId === authEnv.ALLOWED_USER_ID;
+  const isAllowedEmail =
+    Boolean(allowedEmail) && Boolean(identity.email) && identity.email?.toLowerCase() === allowedEmail;
 
-    const result = await sdk.validateJwt(token);
+  if (!isAllowedUserId && !isAllowedEmail) {
+    throw new ForbiddenError("Forbidden: Identity mismatch");
+  }
 
-    if (!result.token?.sub) {
-        throw new Error("Invalid session token");
-    }
+  return identity.userId;
+}
 
-    return result.token.sub;
+export function authErrorResponse(error: unknown): Response {
+  if (error instanceof ForbiddenError) {
+    return Response.json({ error: error.message }, { status: 403 });
+  }
+
+  return Response.json({ error: "Unauthorized" }, { status: 401 });
 }
 
 function extractCookieValue(cookieHeader: string, name: string): string | undefined {
-    const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-    return match?.[1]?.trim() || undefined;
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match?.[1]?.trim() || undefined;
+}
+
+async function getValidatedIdentity(req: Request): Promise<{ userId: string; email?: string }> {
+  const cookieHeader = req.headers.get("cookie") ?? "";
+  const authHeader = req.headers.get("authorization") ?? "";
+  const token =
+    authHeader.replace(/^Bearer\s+/i, "").trim() ||
+    extractCookieValue(cookieHeader, "DS") ||
+    extractCookieValue(cookieHeader, "DSR");
+
+  if (!token) {
+    throw new UnauthorizedError("No session token found");
+  }
+
+  const result = await sdk.validateJwt(token);
+  const userId = result.token?.sub;
+
+  if (!userId) {
+    throw new UnauthorizedError("Invalid session token");
+  }
+
+  return {
+    userId,
+    email: typeof result.token?.email === "string" ? result.token.email : undefined,
+  };
 }

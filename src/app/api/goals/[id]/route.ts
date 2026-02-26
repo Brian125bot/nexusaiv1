@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { db } from "@/db";
 import { goals } from "@/db/schema";
+import { authErrorResponse, validateUser } from "@/lib/auth/session";
+import { rateLimitExceededResponse, writeRatelimit } from "@/lib/rate-limit";
 
 const updateGoalSchema = z
   .object({
@@ -20,6 +22,18 @@ type RouteContext = {
 };
 
 export async function PATCH(req: Request, context: RouteContext) {
+  let userId: string;
+  try {
+    userId = await validateUser(req);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+
+  const { success, limit, remaining, reset } = await writeRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   const { id } = await context.params;
 
   let requestBody: unknown;
@@ -54,7 +68,19 @@ export async function PATCH(req: Request, context: RouteContext) {
   }
 }
 
-export async function DELETE(_: Request, context: RouteContext) {
+export async function DELETE(req: Request, context: RouteContext) {
+  let userId: string;
+  try {
+    userId = await validateUser(req);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+
+  const { success, limit, remaining, reset } = await writeRatelimit.limit(userId);
+  if (!success) {
+    return rateLimitExceededResponse({ limit, remaining, reset });
+  }
+
   const { id } = await context.params;
 
   try {

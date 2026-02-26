@@ -39,60 +39,62 @@ export async function syncSessionStatus(input: SyncInput) {
     throw new Error("Session has no external Jules session ID");
   }
 
-  const julesSession = await julesClient.getSession(session.externalSessionId);
+  const externalSessionId = session.externalSessionId;
+  const julesSession = await julesClient.getSession(externalSessionId);
   const mappedStatus = mapJulesStatusToRegistryStatus(julesSession.status);
-
-  if (mappedStatus) {
-    await db
-      .update(sessions)
-      .set({
-        status: mappedStatus,
-        julesSessionUrl: julesSession.url ?? session.julesSessionUrl,
-        lastSyncedAt: new Date(),
-        lastError: null,
-      })
-      .where(eq(sessions.id, session.id));
-  }
-
   const prUrl = julesSession.outputs?.pullRequest?.url;
 
-  if (mappedStatus === "completed") {
-    if (session.goalId && prUrl) {
-      const goal = await db.query.goals.findFirst({ where: eq(goals.id, session.goalId) });
-
-      if (goal) {
-        const artifacts = (goal.reviewArtifacts ?? []) as ReviewArtifact[];
-        const alreadyExists = artifacts.some(
-          (artifact) =>
-            artifact.type === "pull_request" &&
-            artifact.url === prUrl &&
-            artifact.sessionExternalId === session.externalSessionId,
-        );
-
-        if (!alreadyExists) {
-          artifacts.push({
-            type: "pull_request",
-            url: prUrl,
-            sessionExternalId: session.externalSessionId,
-            createdAt: new Date().toISOString(),
-          });
-
-          await db
-            .update(goals)
-            .set({ reviewArtifacts: artifacts })
-            .where(eq(goals.id, session.goalId));
-        }
-      }
+  const updated = await db.transaction(async (tx) => {
+    if (mappedStatus) {
+      await tx
+        .update(sessions)
+        .set({
+          status: mappedStatus,
+          julesSessionUrl: julesSession.url ?? session.julesSessionUrl,
+          lastSyncedAt: new Date(),
+          lastError: null,
+        })
+        .where(eq(sessions.id, session.id));
     }
 
-    await db.delete(fileLocks).where(eq(fileLocks.sessionId, session.id));
-  }
+    if (mappedStatus === "completed") {
+      if (session.goalId && prUrl) {
+        const goal = await tx.query.goals.findFirst({ where: eq(goals.id, session.goalId) });
 
-  if (mappedStatus === "failed") {
-    await db.delete(fileLocks).where(eq(fileLocks.sessionId, session.id));
-  }
+        if (goal) {
+          const artifacts = (goal.reviewArtifacts ?? []) as ReviewArtifact[];
+          const alreadyExists = artifacts.some(
+            (artifact) =>
+              artifact.type === "pull_request" &&
+              artifact.url === prUrl &&
+              artifact.sessionExternalId === externalSessionId,
+          );
 
-  const updated = await db.query.sessions.findFirst({ where: eq(sessions.id, session.id) });
+          if (!alreadyExists) {
+            artifacts.push({
+              type: "pull_request",
+              url: prUrl,
+              sessionExternalId: externalSessionId,
+              createdAt: new Date().toISOString(),
+            });
+
+            await tx
+              .update(goals)
+              .set({ reviewArtifacts: artifacts })
+              .where(eq(goals.id, session.goalId));
+          }
+        }
+      }
+
+      await tx.delete(fileLocks).where(eq(fileLocks.sessionId, session.id));
+    }
+
+    if (mappedStatus === "failed") {
+      await tx.delete(fileLocks).where(eq(fileLocks.sessionId, session.id));
+    }
+
+    return await tx.query.sessions.findFirst({ where: eq(sessions.id, session.id) });
+  });
 
   return {
     session: updated,

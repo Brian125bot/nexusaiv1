@@ -24,6 +24,26 @@ export const syncRatelimit = new Ratelimit({
 });
 
 /**
+ * General API limiter for lower-cost read endpoints.
+ * Limit: 60 requests per 60-second sliding window per user.
+ */
+export const apiRatelimit = new Ratelimit({
+    redis: kv,
+    limiter: Ratelimit.slidingWindow(60, "60 s"),
+    prefix: "nexus:rl:api",
+});
+
+/**
+ * Write-heavy limiter for mutation endpoints.
+ * Limit: 10 requests per 60-second sliding window per user.
+ */
+export const writeRatelimit = new Ratelimit({
+    redis: kv,
+    limiter: Ratelimit.slidingWindow(10, "60 s"),
+    prefix: "nexus:rl:write",
+});
+
+/**
  * Helper to build a 429 response with standard rate-limit headers.
  */
 export function rateLimitExceededResponse(result: {
