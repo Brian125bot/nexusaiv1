@@ -6,62 +6,12 @@ import { sessions, fileLocks, goals, cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import {
   analyzeCascade,
-  type FileChange,
 } from "@/lib/auditor/cascade-engine";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
+import { cascadeRequestSchema, cascadeResponseSchema } from "@/lib/cascade/schemas";
 
 export const runtime = "nodejs";
-
-const cascadeRequestSchema = z.object({
-  sourceRepo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-  branch: z.string().min(1),
-  commitSha: z.string().min(1),
-  fileChanges: z.array(
-    z.object({
-      filePath: z.string().min(1),
-      diff: z.string().min(1),
-      status: z.enum(["added", "modified", "removed"]),
-    }),
-  ),
-  goalId: z.string().uuid().optional(),
-  autoDispatch: z.boolean().default(false),
-});
-
-const cascadeResponseSchema = z.object({
-  cascadeId: z.string(),
-  isCascade: z.boolean(),
-  coreFilesChanged: z.array(z.string()),
-  downstreamFiles: z.array(z.string()),
-  repairJobs: z.array(
-    z.object({
-      id: z.string(),
-      files: z.array(z.string()),
-      prompt: z.string(),
-      priority: z.enum(["high", "medium", "low"]),
-      estimatedImpact: z.string(),
-    }),
-  ),
-  dispatchedSessions: z
-    .array(
-      z.object({
-        jobId: z.string(),
-        sessionId: z.string(),
-        status: z.string(),
-      }),
-    )
-    .optional(),
-  summary: z.string(),
-  confidence: z.number(),
-  telemetry: z
-    .object({
-      dispatchLatencyMs: z.number().int().nonnegative(),
-      conflictCount: z.number().int().nonnegative(),
-      dispatchedCount: z.number().int().nonnegative(),
-      failedCount: z.number().int().nonnegative(),
-    })
-    .optional(),
-});
 
 export type CascadeDispatchResult = z.infer<typeof cascadeResponseSchema>;
 
@@ -71,9 +21,8 @@ export type CascadeDispatchResult = z.infer<typeof cascadeResponseSchema>;
  * Analyze the blast radius of core file changes and optionally dispatch repair agents
  */
 export async function POST(req: Request) {
-  let userId: string;
   try {
-    userId = await validateUser(req);
+    await validateUser(req);
   } catch (error) {
     return authErrorResponse(error);
   }

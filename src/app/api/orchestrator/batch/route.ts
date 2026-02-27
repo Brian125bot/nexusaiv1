@@ -9,63 +9,9 @@ import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
+import { batchDispatchSchema, batchDispatchResponseSchema } from "@/lib/cascade/schemas";
 
 export const runtime = "nodejs";
-
-/**
- * Schema for batch dispatch request
- */
-const batchDispatchSchema = z.object({
-  sourceRepo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-  baseBranch: z.string().min(1),
-  cascadeId: z.string().min(1),
-  jobs: z.array(
-    z.object({
-      id: z.string().min(1),
-      files: z.array(z.string().min(1)),
-      prompt: z.string().min(1),
-      priority: z.enum(["high", "medium", "low"]),
-      estimatedImpact: z.string().min(1),
-    }),
-  ),
-  goalId: z.string().uuid().optional(),
-});
-
-/**
- * Schema for batch dispatch response
- */
-const batchDispatchResponseSchema = z.object({
-  batchId: z.string(),
-  cascadeId: z.string(),
-  totalJobs: z.number(),
-  dispatchedCount: z.number(),
-  failedCount: z.number(),
-  sessions: z.array(
-    z.object({
-      jobId: z.string(),
-      sessionId: z.string(),
-      sessionUrl: z.string(),
-      status: z.string(),
-      lockedFiles: z.array(z.string()),
-    }),
-  ),
-  lockConflicts: z
-    .array(
-      z.object({
-        filePath: z.string(),
-        existingSessionId: z.string(),
-      }),
-    )
-    .optional(),
-  telemetry: z
-    .object({
-      dispatchLatencyMs: z.number().int().nonnegative(),
-      conflictCount: z.number().int().nonnegative(),
-      dispatchedCount: z.number().int().nonnegative(),
-      failedCount: z.number().int().nonnegative(),
-    })
-    .optional(),
-});
 
 export type BatchDispatchResult = z.infer<typeof batchDispatchResponseSchema>;
 

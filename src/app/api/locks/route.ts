@@ -1,15 +1,9 @@
 import { desc, eq } from "drizzle-orm";
-import { z } from "zod";
 
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { apiRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
-
-const releaseLockSchema = z.object({
-  filePath: z.string().optional(),
-  sessionId: z.string().optional(),
-});
 
 export async function GET(req: Request) {
   let userId: string;
@@ -79,7 +73,7 @@ export async function DELETE(req: Request) {
       );
     }
 
-    let deletedRecords: any[] = [];
+    let deletedRecords;
     
     if (filePath) {
       deletedRecords = await db
@@ -91,6 +85,8 @@ export async function DELETE(req: Request) {
         .delete(fileLocks)
         .where(eq(fileLocks.sessionId, sessionId))
         .returning();
+    } else {
+      deletedRecords = [];
     }
 
     console.log(`🔓 Nexus: Released ${deletedRecords.length} lock(s)`);

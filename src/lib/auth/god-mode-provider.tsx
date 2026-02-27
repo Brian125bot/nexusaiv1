@@ -54,7 +54,7 @@ export function useGodModeUser() {
       ? {
           name: descopeUser.name || descopeUser.email || "User",
           email: descopeUser.email,
-          roles: (descopeUser as any).roles || [],
+          roles: (descopeUser as { roles?: string[] }).roles || [],
         }
       : null,
     isAuthenticated: !!descopeUser,

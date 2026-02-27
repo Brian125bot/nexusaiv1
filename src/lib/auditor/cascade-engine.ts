@@ -3,7 +3,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { z } from "zod";
 
 import { aiEnv } from "@/lib/config";
-import { CORE_FILES, CORE_FILE_PATTERNS, CASCADE_CONFIG, isCoreFile } from "@/lib/cascade-config";
+import { CASCADE_CONFIG, isCoreFile } from "@/lib/cascade-config";
 import { julesClient } from "@/lib/jules/client";
 
 const google = createGoogleGenerativeAI({
@@ -151,7 +151,7 @@ export async function analyzeCascade(
 
     // Filter repair jobs by confidence and max parallel agents
     const qualifiedJobs = analysis.repairJobs
-      .filter(job => analysis.confidence >= CASCADE_CONFIG.minConfidenceScore)
+      .filter(() => analysis.confidence >= CASCADE_CONFIG.minConfidenceScore)
       .slice(0, CASCADE_CONFIG.maxParallelAgents);
 
     return {

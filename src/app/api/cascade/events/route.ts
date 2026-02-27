@@ -1,21 +1,10 @@
 import { desc } from "drizzle-orm";
-import { z } from "zod";
 
 import { db } from "@/db";
 import { cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 
 export const runtime = "nodejs";
-
-const cascadeEventSchema = z.object({
-  cascadeId: z.string(),
-  isCascade: z.boolean(),
-  coreFilesChanged: z.array(z.string()),
-  downstreamFiles: z.array(z.string()),
-  repairJobCount: z.number(),
-  status: z.enum(["analyzing", "dispatched", "completed", "failed"]),
-  createdAt: z.number(),
-});
 
 /**
  * GET /api/cascade/events

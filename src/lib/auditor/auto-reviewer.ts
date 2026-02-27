@@ -7,7 +7,7 @@ import { db } from "@/db";
 import { goals, sessions, cascades } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
-import { analyzeCascade, detectCoreFileChanges, type FileChange } from "@/lib/auditor/cascade-engine";
+import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
 
 const google = createGoogleGenerativeAI({
   apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
