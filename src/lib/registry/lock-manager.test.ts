@@ -40,6 +40,16 @@ describe("LockManager", () => {
     expect(result).toBe(false);
   });
 
+  it("should return conflict metadata from acquireLocks", async () => {
+    const filePath = "/src/app/page.tsx";
+    const result = await LockManager.acquireLocks(TEST_SESSION_2, [filePath]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("conflict");
+      expect(result.conflicts.some((conflict) => conflict.filePath === filePath)).toBe(true);
+    }
+  });
+
   it("should allow the same session to lock the same file again (idempotent-ish)", async () => {
     const filePath = "/src/app/page.tsx";
     const result = await LockManager.requestLock(TEST_SESSION_1, [filePath]);

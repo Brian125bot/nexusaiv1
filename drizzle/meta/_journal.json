@@ -15,6 +15,20 @@
       "when": 1772073912272,
       "tag": "0001_spicy_killraven",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1772142946383,
+      "tag": "0002_odd_spectrum",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1772196890639,
+      "tag": "0003_remarkable_naoko",
+      "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
-import { AuthProvider } from "@descope/nextjs-sdk";
 import { publicEnv } from "@/lib/config";
+import { GodModeAuthProvider } from "@/lib/auth/god-mode-provider";
 import "./globals.css";
 
 const headingFont = Space_Grotesk({
@@ -28,9 +28,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${headingFont.variable} ${monoFont.variable} antialiased`}>
-        <AuthProvider projectId={publicEnv.NEXT_PUBLIC_DESCOPE_PROJECT_ID}>
+        <GodModeAuthProvider projectId={publicEnv.NEXT_PUBLIC_DESCOPE_PROJECT_ID}>
           {children}
-        </AuthProvider>
+        </GodModeAuthProvider>
       </body>
     </html>
   );

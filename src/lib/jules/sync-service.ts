@@ -1,7 +1,7 @@
 import { eq, or } from "drizzle-orm";
 
 import { db } from "@/db";
-import { fileLocks, goals, sessions } from "@/db/schema";
+import { cascades, fileLocks, goals, sessions } from "@/db/schema";
 import { julesClient } from "@/lib/jules/client";
 import { mapJulesStatusToRegistryStatus } from "@/lib/jules/status-map";
 
@@ -96,9 +96,41 @@ export async function syncSessionStatus(input: SyncInput) {
     return await tx.query.sessions.findFirst({ where: eq(sessions.id, session.id) });
   });
 
+  if (session.cascadeId) {
+    await reconcileCascadeStatus(session.cascadeId);
+  }
+
   return {
     session: updated,
     externalStatus: julesSession.status,
     pullRequestUrl: prUrl ?? null,
   };
+}
+
+async function reconcileCascadeStatus(cascadeId: string) {
+  const relatedSessions = await db.query.sessions.findMany({
+    where: eq(sessions.cascadeId, cascadeId),
+  });
+
+  if (relatedSessions.length === 0) {
+    return;
+  }
+
+  const statuses = relatedSessions.map((session) => session.status);
+  const hasActive = statuses.some((status) =>
+    status === "queued" || status === "executing" || status === "verifying",
+  );
+
+  let nextStatus: "dispatched" | "completed" | "failed";
+  if (hasActive) {
+    nextStatus = "dispatched";
+  } else if (statuses.every((status) => status === "completed")) {
+    nextStatus = "completed";
+  } else if (statuses.some((status) => status === "failed")) {
+    nextStatus = "failed";
+  } else {
+    nextStatus = "dispatched";
+  }
+
+  await db.update(cascades).set({ status: nextStatus }).where(eq(cascades.id, cascadeId));
 }

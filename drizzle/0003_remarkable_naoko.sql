@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "is_cascade_root" boolean DEFAULT false NOT NULL;

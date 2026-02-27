@@ -2,7 +2,99 @@ import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
 import { eq, inArray } from "drizzle-orm";
 
+export type LockConflict = {
+  filePath: string;
+  sessionId: string;
+};
+
+export type AcquireLockResult =
+  | {
+      ok: true;
+      lockedFiles: string[];
+    }
+  | {
+      ok: false;
+      reason: "conflict";
+      conflicts: LockConflict[];
+    };
+
+function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const withCode = error as { code?: string; cause?: { code?: string } };
+  return withCode.code === "23505" || withCode.cause?.code === "23505";
+}
+
 export class LockManager {
+  static async acquireLocks(sessionId: string, filePaths: string[]): Promise<AcquireLockResult> {
+    const uniquePaths = [...new Set(filePaths)];
+    if (uniquePaths.length === 0) {
+      return { ok: true, lockedFiles: [] };
+    }
+
+    return await db.transaction(async (tx) => {
+      const existingLocks = await tx
+        .select({
+          filePath: fileLocks.filePath,
+          sessionId: fileLocks.sessionId,
+        })
+        .from(fileLocks)
+        .where(inArray(fileLocks.filePath, uniquePaths));
+
+      const conflicts = existingLocks.filter((lock) => lock.sessionId !== sessionId);
+      if (conflicts.length > 0) {
+        return {
+          ok: false,
+          reason: "conflict" as const,
+          conflicts,
+        };
+      }
+
+      const alreadyLockedBySession = new Set(existingLocks.map((lock) => lock.filePath));
+      const newLocks = uniquePaths
+        .filter((filePath) => !alreadyLockedBySession.has(filePath))
+        .map((filePath) => ({
+          sessionId,
+          filePath,
+        }));
+
+      if (newLocks.length === 0) {
+        return {
+          ok: true,
+          lockedFiles: uniquePaths,
+        };
+      }
+
+      try {
+        await tx.insert(fileLocks).values(newLocks);
+        return {
+          ok: true,
+          lockedFiles: uniquePaths,
+        };
+      } catch (error) {
+        if (!isUniqueViolation(error)) {
+          throw error;
+        }
+
+        const contestedLocks = await tx
+          .select({
+            filePath: fileLocks.filePath,
+            sessionId: fileLocks.sessionId,
+          })
+          .from(fileLocks)
+          .where(inArray(fileLocks.filePath, uniquePaths));
+
+        return {
+          ok: false,
+          reason: "conflict" as const,
+          conflicts: contestedLocks.filter((lock) => lock.sessionId !== sessionId),
+        };
+      }
+    });
+  }
+
   /**
    * Checks if any of the requested files are already locked by another session.
    * If not, it creates new locks for the given session.
@@ -12,51 +104,8 @@ export class LockManager {
    * @returns boolean true if locks were successfully acquired, false otherwise
    */
   static async requestLock(sessionId: string, filePaths: string[]): Promise<boolean> {
-    if (filePaths.length === 0) return true;
-
-    return await db.transaction(async (tx) => {
-      // Check if any of these files are already locked
-      const existingLocks = await tx
-        .select()
-        .from(fileLocks)
-        .where(inArray(fileLocks.filePath, filePaths));
-
-      if (existingLocks.length > 0) {
-        // Some files are already locked.
-        // If they are locked by the SAME session, we might want to allow it?
-        // But the spec says "reject a second lock request for the same path"
-        // Let's check if they belong to another session.
-        const lockedByOthers = existingLocks.filter(lock => lock.sessionId !== sessionId);
-        if (lockedByOthers.length > 0) {
-          return false;
-        }
-        
-        // If all existing locks are by the same session, we can skip re-locking them?
-        // Or just re-insert others.
-        const alreadyLockedByMe = new Set(existingLocks.map(l => l.filePath));
-        const newFilesToLock = filePaths.filter(path => !alreadyLockedByMe.has(path));
-        
-        if (newFilesToLock.length > 0) {
-          await tx.insert(fileLocks).values(
-            newFilesToLock.map(path => ({
-              sessionId,
-              filePath: path,
-            }))
-          );
-        }
-        return true;
-      }
-
-      // No existing locks, so we can proceed.
-      await tx.insert(fileLocks).values(
-        filePaths.map(path => ({
-          sessionId,
-          filePath: path,
-        }))
-      );
-
-      return true;
-    });
+    const result = await LockManager.acquireLocks(sessionId, filePaths);
+    return result.ok;
   }
 
   /**

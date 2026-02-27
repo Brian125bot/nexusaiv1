@@ -20,17 +20,44 @@ class ForbiddenError extends Error {
 }
 
 /**
+ * Mock user for Developer Auth Bypass (God Mode)
+ */
+const GOD_MODE_USER = {
+  userId: "dev-god-mode-user",
+  email: "dev@nexus-orchestrator.local",
+  name: "Dev User (Nexus God Mode)",
+  roles: ["admin", "lead_architect"],
+};
+
+/**
+ * Check if God Mode (Developer Auth Bypass) is active
+ */
+function isGodModeActive(): boolean {
+  return process.env.NODE_ENV === "development" && process.env.SKIP_AUTH === "true";
+}
+
+/**
  * Extract and validate the Descope session from a request.
  * Returns the authenticated user's ID (sub claim).
  *
  * Throws if the session is invalid or missing.
  */
 export async function getAuthenticatedUserId(req: Request): Promise<string> {
+  if (isGodModeActive()) {
+    console.log("🛡️ Nexus: God Mode - Returning mock user ID");
+    return GOD_MODE_USER.userId;
+  }
+
   const { userId } = await getValidatedIdentity(req);
   return userId;
 }
 
 export async function validateUser(req: Request): Promise<string> {
+  if (isGodModeActive()) {
+    console.log("🛡️ Nexus: God Mode - Skipping user validation");
+    return GOD_MODE_USER.userId;
+  }
+
   const identity = await getValidatedIdentity(req);
   const allowedEmail = authEnv.ALLOWED_USER_EMAIL?.toLowerCase();
 
@@ -81,4 +108,51 @@ async function getValidatedIdentity(req: Request): Promise<{ userId: string; ema
     userId,
     email: typeof result.token?.email === "string" ? result.token.email : undefined,
   };
+}
+
+/**
+ * Get session data for server components.
+ * Returns mock user data when God Mode is active.
+ */
+export async function getNexusSession(req?: Request) {
+  if (isGodModeActive()) {
+    console.log("🛡️ Nexus: God Mode - Returning mock session");
+    return {
+      user: {
+        name: GOD_MODE_USER.name,
+        email: GOD_MODE_USER.email,
+        roles: GOD_MODE_USER.roles,
+      },
+      isMock: true,
+    };
+  }
+
+  const cookieHeader = req?.headers?.get("cookie") ?? "";
+  const authHeader = req?.headers?.get("authorization") ?? "";
+  const token =
+    authHeader.replace(/^Bearer\s+/i, "").trim() ||
+    extractCookieValue(cookieHeader, "DS") ||
+    extractCookieValue(cookieHeader, "DSR");
+
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const result = await sdk.validateJwt(token);
+    if (result.token?.sub) {
+      return {
+        user: {
+          name: result.token.name || result.token.email || "User",
+          email: result.token.email,
+          roles: result.token.roles || [],
+        },
+        isMock: false,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }

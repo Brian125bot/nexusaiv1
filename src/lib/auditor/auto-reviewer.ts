@@ -4,9 +4,10 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { goals, sessions } from "@/db/schema";
+import { goals, sessions, cascades } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
+import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
 
 const google = createGoogleGenerativeAI({
   apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
@@ -42,6 +43,11 @@ export type ReviewResult = {
   sessionId?: string;
   goalId?: string;
   commentTarget?: "pull_request" | "commit";
+  cascadeAnalysis?: {
+    isCascade: boolean;
+    coreFilesChanged: string[];
+    repairJobCount: number;
+  };
 };
 
 function buildReviewComment(input: {
@@ -135,53 +141,105 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     };
   }
 
-  const { object: analysis } = await generateObject({
-    model: google(AUDITOR_MODEL),
-    schema: reviewSchema,
-    system:
-      "You are the Nexus Auditor. Review this diff against the project's Acceptance Criteria. Identify any architectural drift, hardcoded secrets, or logic errors.",
-    prompt: [
-      `Repository: ${sourceRepo}`,
-      `Branch: ${input.branch}`,
-      `Commit SHA: ${input.sha}`,
-      "Acceptance Criteria:",
-      JSON.stringify(goal.acceptanceCriteria ?? [], null, 2),
-      "Git Diff:",
-      diff,
-    ].join("\n\n"),
-    providerOptions: {
-      google: {
-        thinkingConfig: {
-          thinkingLevel: "medium",
+  // Extract changed files from diff for cascade analysis
+  const changedFiles = extractChangedFilesFromDiff(diff);
+  const fileChanges: FileChange[] = changedFiles.map(filePath => ({
+    filePath,
+    diff: diff,
+    status: "modified" as const,
+  }));
+
+  // Run cascade analysis in parallel with regular review
+  const [reviewAnalysis, cascadeResult] = await Promise.all([
+    generateObject({
+      model: google(AUDITOR_MODEL),
+      schema: reviewSchema,
+      system:
+        "You are the Nexus Auditor. Review this diff against the project's Acceptance Criteria. Identify any architectural drift, hardcoded secrets, or logic errors.",
+      prompt: [
+        `Repository: ${sourceRepo}`,
+        `Branch: ${input.branch}`,
+        `Commit SHA: ${input.sha}`,
+        "Acceptance Criteria:",
+        JSON.stringify(goal.acceptanceCriteria ?? [], null, 2),
+        "Git Diff:",
+        diff,
+      ].join("\n\n"),
+      providerOptions: {
+        google: {
+          thinkingConfig: {
+            thinkingLevel: "medium",
+          },
         },
       },
-    },
-  });
+    }),
+    analyzeCascade(fileChanges),
+  ]);
 
   const comment = buildReviewComment({
-    severity: analysis.severity,
-    summary: analysis.summary,
-    findings: analysis.findings,
-    recommendedFixPrompt: analysis.recommendedFixPrompt,
+    severity: reviewAnalysis.object.severity,
+    summary: reviewAnalysis.object.summary,
+    findings: reviewAnalysis.object.findings,
+    recommendedFixPrompt: reviewAnalysis.object.recommendedFixPrompt,
     goalId: goal.id,
   });
 
+  // Append cascade information to comment if detected
+  const finalComment = cascadeResult.isCascade
+    ? `${comment}\n\n---\n\n## 🌊 Blast Radius Cascade Detected\n\n**Core Files Changed:** ${cascadeResult.coreFilesChanged.join(", ")}\n\n**Downstream Files Affected:** ${cascadeResult.downstreamFiles.length}\n\n**Repair Jobs Identified:** ${cascadeResult.repairJobs.length}\n\n${cascadeResult.summary}\n\n> Cascade ID: \`${session.id}-cascade\``
+    : comment;
+
   if (input.eventType === "pull_request" && input.prNumber) {
-    await githubClient.postPullRequestComment(input.owner, input.repo, input.prNumber, comment);
+    await githubClient.postPullRequestComment(input.owner, input.repo, input.prNumber, finalComment);
   } else {
-    await githubClient.postCommitComment(input.owner, input.repo, input.sha, comment);
+    await githubClient.postCommitComment(input.owner, input.repo, input.sha, finalComment);
+  }
+
+  if (cascadeResult.isCascade) {
+    const cascadeId = `${session.id}-cascade`;
+    await db.insert(cascades).values({
+      id: cascadeId,
+      triggerSessionId: session.id,
+      coreFilesChanged: cascadeResult.coreFilesChanged,
+      downstreamFiles: cascadeResult.downstreamFiles,
+      repairJobCount: cascadeResult.repairJobs.length,
+      summary: cascadeResult.summary,
+      status: "analyzing",
+    }).onConflictDoNothing();
   }
 
   await db
     .update(sessions)
-    .set({ lastReviewedCommit: input.sha })
+    .set({ 
+      lastReviewedCommit: input.sha,
+    })
     .where(eq(sessions.id, session.id));
 
   return {
     outcome: "review_posted",
-    severity: analysis.severity,
+    severity: reviewAnalysis.object.severity,
     sessionId: session.id,
     goalId: goal.id,
     commentTarget: input.eventType === "pull_request" ? "pull_request" : "commit",
+    cascadeAnalysis: {
+      isCascade: cascadeResult.isCascade,
+      coreFilesChanged: cascadeResult.coreFilesChanged,
+      repairJobCount: cascadeResult.repairJobs.length,
+    },
   };
+}
+
+/**
+ * Extract file paths from a git diff
+ */
+function extractChangedFilesFromDiff(diff: string): string[] {
+  const filePattern = /^diff --git a\/(.+?) b\/(.+?)$/gm;
+  const files = new Set<string>();
+  let match;
+  
+  while ((match = filePattern.exec(diff)) !== null) {
+    files.add(match[2]);
+  }
+  
+  return Array.from(files);
 }
