@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, serial, timestamp, jsonb, pgEnum, integer } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, serial, timestamp, jsonb, pgEnum, integer, boolean } from "drizzle-orm/pg-core";
 
 export const goalStatusEnum = pgEnum("goal_status", ["backlog", "in-progress", "completed", "drifted"]);
 export const sessionStatusEnum = pgEnum("session_status", ["queued", "executing", "verifying", "completed", "failed"]);
@@ -38,6 +38,7 @@ export const sessions = pgTable("sessions", {
   externalSessionId: text("external_session_id").unique(),
   goalId: uuid("goal_id").references(() => goals.id, { onDelete: "set null" }),
   cascadeId: text("cascade_id").references(() => cascades.id, { onDelete: "set null" }),
+  isCascadeRoot: boolean("is_cascade_root").default(false).notNull(),
   sourceRepo: text("source_repo").default("").notNull(),
   lastReviewedCommit: text("last_reviewed_commit"),
   julesSessionUrl: text("jules_session_url"),
