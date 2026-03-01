@@ -279,18 +279,20 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
 
       console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
 
-      await db.insert(sessions).values({
-        id: newSessionId,
-        goalId: goal.id,
-        sourceRepo: session.sourceRepo,
-        branchName: session.branchName,
-        baseBranch: session.baseBranch,
-        status: "queued",
-        remediationDepth: session.remediationDepth + 1,
-      });
+      await db.transaction(async (tx) => {
+        await tx.insert(sessions).values({
+          id: newSessionId!,
+          goalId: goal.id,
+          sourceRepo: session.sourceRepo,
+          branchName: session.branchName,
+          baseBranch: session.baseBranch,
+          status: "queued",
+          remediationDepth: session.remediationDepth + 1,
+        });
 
-      // Atomic Handoff: Transfer locks to new session
-      await LockManager.transferLocks(session.id, newSessionId);
+        // Atomic Handoff: Transfer locks to new session
+        await LockManager.transferLocks(session.id, newSessionId!, tx);
+      });
 
       // Contextual Repair: Inform orchestrator to dispatch this new session
       // This could involve calling the Jules sync endpoint or similar

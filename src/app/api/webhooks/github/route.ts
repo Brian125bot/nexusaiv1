@@ -276,17 +276,20 @@ export async function POST(req: Request) {
 
         // Self-Healing Trigger
         const newSessionId = `remediate-${crypto.randomUUID()}`;
-        await db.insert(sessions).values({
-          id: newSessionId,
-          goalId: session.goalId,
-          sourceRepo: session.sourceRepo,
-          branchName: session.branchName,
-          baseBranch: session.baseBranch,
-          status: "queued",
-          remediationDepth: session.remediationDepth + 1,
-        });
+        
+        await db.transaction(async (tx) => {
+          await tx.insert(sessions).values({
+            id: newSessionId,
+            goalId: session.goalId,
+            sourceRepo: session.sourceRepo,
+            branchName: session.branchName,
+            baseBranch: session.baseBranch,
+            status: "queued",
+            remediationDepth: session.remediationDepth + 1,
+          });
 
-        await LockManager.transferLocks(session.id, newSessionId);
+          await LockManager.transferLocks(session.id, newSessionId, tx);
+        });
 
         return Response.json({ received: true, eventType, result: "ci_failed_remediation_triggered", newSessionId });
       }
@@ -307,8 +310,12 @@ export async function POST(req: Request) {
               branch: branchName,
               sha: check_run.head_sha,
             });
-          } catch (err) {
+          } catch (err: any) {
             console.error("Auditor error:", err);
+            // CRITICAL: Prevent silent failure state
+            await db.update(sessions)
+              .set({ status: "failed", lastError: String(err.message || err).substring(0, 5000) })
+              .where(eq(sessions.id, session.id));
           }
         });
 
