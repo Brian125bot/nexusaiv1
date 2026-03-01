@@ -5,7 +5,7 @@ import { z } from "zod";
 import crypto from "crypto";
 
 import { db } from "@/db";
-import { goals, sessions, cascades } from "@/db/schema";
+import { goals, sessions, cascades, type AcceptanceCriterion } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
 import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
@@ -193,7 +193,8 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
 
   // Update Goal Acceptance Criteria
   if (assessment && goal.acceptanceCriteria && Array.isArray(goal.acceptanceCriteria)) {
-    const updatedCriteria = goal.acceptanceCriteria.map((c: any) => {
+    const criteria = goal.acceptanceCriteria as AcceptanceCriterion[];
+    const updatedCriteria = criteria.map((c) => {
       const result = assessment[c.id];
       if (result) {
         if (!result.met) hasFailure = true;
@@ -255,6 +256,8 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     const fixPrompt = reviewAnalysis.object.recommendedFixPrompt 
       ? `\n\nSuggested Fix:\n${reviewAnalysis.object.recommendedFixPrompt}` 
       : `\n\nFindings:\n${reviewAnalysis.object.findings.join("\n")}`;
+
+    console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
 
     await db.insert(sessions).values({
       id: newSessionId,
