@@ -136,6 +136,7 @@ export class LockManager {
    * Transfers all locks from an old session to a new session.
    * Useful for handing off context during self-healing / remediation.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static async transferLocks(oldSessionId: string, newSessionId: string, dbOrTx: any = db): Promise<void> {
     await dbOrTx
       .update(fileLocks)

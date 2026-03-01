@@ -310,11 +310,12 @@ export async function POST(req: Request) {
               branch: branchName,
               sha: check_run.head_sha,
             });
-          } catch (err: any) {
+          } catch (err: unknown) {
             console.error("Auditor error:", err);
             // CRITICAL: Prevent silent failure state
+            const errorMessage = err instanceof Error ? err.message : String(err);
             await db.update(sessions)
-              .set({ status: "failed", lastError: String(err.message || err).substring(0, 5000) })
+              .set({ status: "failed", lastError: errorMessage.substring(0, 5000) })
               .where(eq(sessions.id, session.id));
           }
         });
