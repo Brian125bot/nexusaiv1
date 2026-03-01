@@ -116,17 +116,17 @@ export async function POST(req: Request) {
           const result = streamText({
             model: google(AUDITOR_MODEL),
             system:
-              "You are the Nexus Auditor, an AI technical lead. Review the coding request, inspect lock state, and produce a safe orchestration decision. Always check lock state before planning. If dispatch is disabled, produce a provisional plan only.",
+              "You are the Nexus Auditor, an AI technical lead. Review the coding request, inspect lock state, and produce a safe orchestration decision. Always check lock state before planning. If dispatch is disabled, produce a provisional plan only.\n\nIMPORTANT: When calling triggerJulesSession, you must pass the original user request EXACTLY as provided. Do NOT modify, paraphrase, or add any additional text to the prompt. The user's request must be sent to Jules unchanged.",
             prompt: [
               "Review this coding request and make an orchestration decision.",
               `goalId: ${goalId}`,
-              `request: ${prompt}`,
+              `ORIGINAL_USER_REQUEST_START --> ${prompt} <-- ORIGINAL_USER_REQUEST_END`,
               `sourceRepo: ${sourceRepo}`,
               `startingBranch: ${startingBranch}`,
               `dispatchMode: ${confirmDispatch ? "confirm" : "draft"}`,
               "Step sequence is mandatory:",
               "1) call checkDatabaseState",
-              confirmDispatch ? "2) call triggerJulesSession" : "2) call draftJulesPlan",
+              confirmDispatch ? "2) call triggerJulesSession - pass the original user request exactly as provided above (between the START and END markers)" : "2) call draftJulesPlan",
               "3) return concise reasoning and decision",
             ].join("\n"),
             providerOptions: {

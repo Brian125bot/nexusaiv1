@@ -84,16 +84,16 @@ export async function POST(req: Request) {
     const result = await generateText({
       model: google(AUDITOR_MODEL),
       system:
-        "You are the Nexus Auditor, an AI technical lead. Your job is to review the user's coding request, check for active file locks in the database, and decide whether to start a new Jules coding session on main or stack it on an existing branch to avoid merge conflicts. Always check the database state before making a decision. Do not suggest or trigger a session until lock state is analyzed.",
+        "You are the Nexus Auditor, an AI technical lead. Your job is to review the user's coding request, check for active file locks in the database, and decide whether to start a new Jules coding session on main or stack it on an existing branch to avoid merge conflicts. Always check the database state before making a decision. Do not suggest or trigger a session until lock state is analyzed.\n\nIMPORTANT: When calling triggerJulesSession, you must pass the original user request EXACTLY as provided. Do NOT modify, paraphrase, or add any additional text to the prompt. The user's request must be sent to Jules unchanged.",
       prompt: [
         "Review this coding request and make an orchestration decision.",
         `goalId: ${goalId}`,
-        `request: ${prompt}`,
+        `ORIGINAL_USER_REQUEST_START --> ${prompt} <-- ORIGINAL_USER_REQUEST_END`,
         `sourceRepo: ${sourceRepo}`,
         `startingBranch: ${startingBranch}`,
         "Step sequence is mandatory:",
         "1) call checkDatabaseState",
-        "2) call triggerJulesSession",
+        "2) call triggerJulesSession - pass the original user request exactly as provided above (between the START and END markers)",
         "3) return concise reasoning and decision",
       ].join("\n"),
       providerOptions: {
