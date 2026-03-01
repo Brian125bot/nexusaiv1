@@ -1,8 +1,12 @@
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 
+import { db } from "@/db";
+import { sessions } from "@/db/schema";
 import { reviewWebhookEvent } from "@/lib/auditor/auto-reviewer";
 import { CORE_FILES, isCoreFile } from "@/lib/cascade-config";
 import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
+import { LockManager } from "@/lib/registry/lock-manager";
 
 export const runtime = "nodejs";
 
@@ -14,6 +18,7 @@ const pullRequestEventSchema = z.object({
   }),
   pull_request: z.object({
     number: z.number().int().positive(),
+    merged: z.boolean().default(false),
     head: z.object({
       ref: z.string().min(1),
       sha: z.string().min(1),
@@ -193,6 +198,35 @@ export async function POST(req: Request) {
       }
 
       const { action, repository, pull_request: pr } = parsed.data;
+
+      if (action === "closed") {
+        // Find session linked to this PR branch
+        const session = await db.query.sessions.findFirst({
+          where: eq(sessions.branchName, pr.head.ref),
+        });
+
+        if (session && session.status !== "completed" && session.status !== "failed") {
+          const newStatus = pr.merged ? "completed" : "failed";
+          
+          console.log(`🧹 Nexus: PR closed (${pr.merged ? 'merged' : 'unmerged'}). Transitioning session ${session.id} to ${newStatus} and releasing locks.`);
+          
+          await db
+            .update(sessions)
+            .set({ 
+              status: newStatus,
+              lastSyncedAt: new Date()
+            })
+            .where(eq(sessions.id, session.id));
+
+          // Physically delete entries from the file_locks table
+          await LockManager.releaseLocks(session.id);
+          
+          return Response.json({ received: true, eventType, result: "session_cleaned_up", sessionId: session.id, newStatus });
+        }
+        
+        return Response.json({ ignored: true, reason: "No active session found for closed PR or already terminal" }, { status: 202 });
+      }
+
       if (action !== "opened" && action !== "synchronize") {
         return Response.json({ ignored: true, reason: `Unsupported pull_request action: ${action}` }, { status: 202 });
       }

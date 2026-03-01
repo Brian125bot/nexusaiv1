@@ -39,6 +39,15 @@ export async function syncSessionStatus(input: SyncInput) {
     throw new Error("Session has no external Jules session ID");
   }
 
+  // Skip polling if the session is already in a terminal state
+  if (session.status === "completed" || session.status === "failed") {
+    return {
+      session,
+      externalStatus: session.status,
+      pullRequestUrl: null, // Return null to avoid needing to join to goals for the existing artifact
+    };
+  }
+
   const externalSessionId = session.externalSessionId;
   const julesSession = await julesClient.getSession(externalSessionId);
   const mappedStatus = mapJulesStatusToRegistryStatus(julesSession.status);
