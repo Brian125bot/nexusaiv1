@@ -8,7 +8,7 @@ export interface AcceptanceCriterion {
   id: string;
   text: string;
   met: boolean;
-  reasoning?: string;
+  reasoning: string | null;
   files?: string[];
 }
 

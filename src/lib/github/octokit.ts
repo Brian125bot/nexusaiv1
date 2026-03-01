@@ -48,6 +48,21 @@ export class GitHubClient {
     return response.data;
   }
 
+  async getCheckRunLogs(owner: string, repo: string, checkRunId: number): Promise<string | null> {
+    const octokit = this.getOctokit();
+    try {
+      const response = await octokit.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", {
+        owner,
+        repo,
+        job_id: checkRunId,
+      });
+      return response.data as string;
+    } catch (e) {
+      console.warn("Failed to fetch check run logs", e);
+      return null;
+    }
+  }
+
   async postPullRequestComment(owner: string, repo: string, pullNumber: number, body: string): Promise<void> {
     const octokit = this.getOctokit();
 

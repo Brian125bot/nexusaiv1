@@ -89,6 +89,17 @@ export function GoalBoard() {
     await mutate();
   };
 
+  const reAudit = async (goalId: string) => {
+    try {
+      await jsonRequest(`/api/goals/${goalId}/re-audit`, {
+        method: "POST",
+      });
+      await mutate();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to re-audit");
+    }
+  };
+
   if (isLoading) {
     return <p>Loading goals...</p>;
   }
@@ -220,6 +231,15 @@ export function GoalBoard() {
                     >
                       Delete
                     </button>
+                    {goal.reviewArtifacts.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void reAudit(goal.id)}
+                        className="rounded-md border border-cyan-600 bg-cyan-950/30 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-900/50"
+                      >
+                        Re-Audit
+                      </button>
+                    )}
                   </div>
                 </article>
               ))}

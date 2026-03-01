@@ -13,6 +13,7 @@ const acceptanceCriterionSchema = z.union([
     id: z.string().optional(),
     text: z.string().trim().min(1),
     met: z.boolean().optional().default(false),
+    reasoning: z.string().nullable().optional(),
     files: z.array(z.string()).optional(),
   }),
 ]);
@@ -78,12 +79,14 @@ export async function PATCH(req: Request, context: RouteContext) {
               id: randomUUID(),
               text: criterion,
               met: false,
+              reasoning: null,
             };
           }
           return {
             id: criterion.id || randomUUID(),
             text: criterion.text,
             met: criterion.met,
+            reasoning: criterion.reasoning || null,
             files: criterion.files,
           };
         })
