@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { desc } from "drizzle-orm";
 import { z } from "zod";
 
@@ -6,10 +7,20 @@ import { goals } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { apiRatelimit, rateLimitExceededResponse, writeRatelimit } from "@/lib/rate-limit";
 
+const acceptanceCriterionSchema = z.union([
+  z.string().trim().min(1),
+  z.object({
+    id: z.string().optional(),
+    text: z.string().trim().min(1),
+    met: z.boolean().optional().default(false),
+    files: z.array(z.string()).optional(),
+  }),
+]);
+
 const createGoalSchema = z.object({
   title: z.string().trim().min(1),
   description: z.string().trim().optional(),
-  acceptanceCriteria: z.array(z.string().trim().min(1)).min(1),
+  acceptanceCriteria: z.array(acceptanceCriterionSchema).min(1),
   status: z.enum(["backlog", "in-progress", "completed", "drifted"]).optional(),
 });
 
@@ -69,12 +80,29 @@ export async function POST(req: Request) {
 
   try {
     const payload = parsed.data;
+    
+    const normalizedCriteria = payload.acceptanceCriteria.map((criterion) => {
+      if (typeof criterion === "string") {
+        return {
+          id: randomUUID(),
+          text: criterion,
+          met: false,
+        };
+      }
+      return {
+        id: criterion.id || randomUUID(),
+        text: criterion.text,
+        met: criterion.met,
+        files: criterion.files,
+      };
+    });
+
     const [created] = await db
       .insert(goals)
       .values({
         title: payload.title,
         description: payload.description,
-        acceptanceCriteria: payload.acceptanceCriteria,
+        acceptanceCriteria: normalizedCriteria,
         status: payload.status ?? "backlog",
       })
       .returning();

@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 
@@ -6,11 +7,21 @@ import { goals } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { rateLimitExceededResponse, writeRatelimit } from "@/lib/rate-limit";
 
+const acceptanceCriterionSchema = z.union([
+  z.string().trim().min(1),
+  z.object({
+    id: z.string().optional(),
+    text: z.string().trim().min(1),
+    met: z.boolean().optional().default(false),
+    files: z.array(z.string()).optional(),
+  }),
+]);
+
 const updateGoalSchema = z
   .object({
     title: z.string().trim().min(1).optional(),
     description: z.string().trim().nullable().optional(),
-    acceptanceCriteria: z.array(z.string().trim().min(1)).min(1).optional(),
+    acceptanceCriteria: z.array(acceptanceCriterionSchema).min(1).optional(),
     status: z.enum(["backlog", "in-progress", "completed", "drifted"]).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
@@ -55,7 +66,31 @@ export async function PATCH(req: Request, context: RouteContext) {
   }
 
   try {
-    const [updated] = await db.update(goals).set(parsed.data).where(eq(goals.id, id)).returning();
+    const { acceptanceCriteria, ...restPayload } = parsed.data;
+    
+    // Normalize acceptance criteria if provided
+    const updateData = {
+      ...restPayload,
+      ...(acceptanceCriteria ? {
+        acceptanceCriteria: acceptanceCriteria.map((criterion) => {
+          if (typeof criterion === "string") {
+            return {
+              id: randomUUID(),
+              text: criterion,
+              met: false,
+            };
+          }
+          return {
+            id: criterion.id || randomUUID(),
+            text: criterion.text,
+            met: criterion.met,
+            files: criterion.files,
+          };
+        })
+      } : {})
+    };
+
+    const [updated] = await db.update(goals).set(updateData).where(eq(goals.id, id)).returning();
 
     if (!updated) {
       return Response.json({ error: "Goal not found" }, { status: 404 });

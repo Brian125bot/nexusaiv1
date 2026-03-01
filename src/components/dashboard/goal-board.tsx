@@ -162,7 +162,9 @@ export function GoalBoard() {
                   ) : null}
                   <ul className="mt-2 space-y-1 text-xs text-slate-300">
                     {goal.acceptanceCriteria.map((criterion) => (
-                      <li key={criterion}>• {criterion}</li>
+                      <li key={criterion.id}>
+                        {criterion.met ? "✅" : "⏳"} {criterion.text}
+                      </li>
                     ))}
                   </ul>
                   <div className="mt-2 space-y-1 text-xs text-slate-300">

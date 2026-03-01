@@ -65,6 +65,7 @@ export async function POST(req: Request) {
           title: `Cascade Repair: ${cascadeId}`,
           description: `Automated cascade repair - batch ${batchId}`,
           acceptanceCriteria: jobs.map(job => ({
+            id: randomUUID(),
             text: job.prompt,
             met: false,
           })),

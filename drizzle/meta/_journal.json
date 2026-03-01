@@ -29,6 +29,13 @@
       "when": 1772196890639,
       "tag": "0003_remarkable_naoko",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1772330625078,
+      "tag": "0004_normalize_acceptance_criteria",
+      "breakpoints": true
     }
   ]
 }
