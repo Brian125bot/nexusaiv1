@@ -6,14 +6,17 @@ SET "acceptance_criteria" = (
         jsonb_build_object(
           'id', gen_random_uuid(),
           'text', elem,
-          'met', false
+          'met', false,
+          'reasoning', null,
+          'files', '[]'::jsonb
         )
       WHEN jsonb_typeof(elem) = 'object' THEN
         jsonb_build_object(
           'id', COALESCE(elem->>'id', gen_random_uuid()::text),
           'text', elem->>'text',
           'met', COALESCE((elem->>'met')::boolean, false),
-          'files', elem->'files'
+          'reasoning', COALESCE(elem->>'reasoning', null),
+          'files', COALESCE(elem->'files', '[]'::jsonb)
         )
       ELSE elem
     END

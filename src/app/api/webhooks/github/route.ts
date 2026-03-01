@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { eq } from "drizzle-orm";
+import { after } from "next/server";
+import crypto from "crypto";
 
 import { db } from "@/db";
 import { sessions } from "@/db/schema";
@@ -9,6 +11,32 @@ import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
 import { LockManager } from "@/lib/registry/lock-manager";
 
 export const runtime = "nodejs";
+
+const checkRunEventSchema = z.object({
+  action: z.string(),
+  repository: z.object({
+    name: z.string().min(1),
+    owner: z.object({ login: z.string().min(1) }),
+  }),
+  check_run: z.object({
+    head_sha: z.string(),
+    status: z.string(),
+    conclusion: z.string().nullable(),
+    output: z
+      .object({
+        title: z.string().nullable().optional(),
+        summary: z.string().nullable().optional(),
+        text: z.string().nullable().optional(),
+      })
+      .optional()
+      .nullable(),
+    pull_requests: z.array(
+      z.object({
+        head: z.object({ ref: z.string() }),
+      })
+    ).optional(),
+  }),
+});
 
 const pullRequestEventSchema = z.object({
   action: z.string(),
@@ -189,6 +217,87 @@ export async function POST(req: Request) {
       payload = JSON.parse(rawBody) as unknown;
     } catch {
       return Response.json({ error: "Invalid JSON payload" }, { status: 400 });
+    }
+
+    if (eventType === "check_run") {
+      const parsed = checkRunEventSchema.safeParse(payload);
+      if (!parsed.success) {
+        return Response.json({ error: "Invalid check_run payload", issues: parsed.error.issues }, { status: 400 });
+      }
+
+      const { action, repository, check_run } = parsed.data;
+
+      if (action !== "completed") {
+        return Response.json({ ignored: true, reason: "check_run not completed" }, { status: 202 });
+      }
+
+      const branchName = check_run.pull_requests?.[0]?.head.ref;
+      if (!branchName) {
+        return Response.json({ ignored: true, reason: "No pull request associated with check_run" }, { status: 202 });
+      }
+
+      const session = await db.query.sessions.findFirst({
+        where: eq(sessions.branchName, branchName),
+      });
+
+      if (!session || session.status === "completed") {
+        return Response.json({ ignored: true, reason: "No active session found for branch" }, { status: 202 });
+      }
+
+      if (check_run.conclusion === "failure") {
+        // CI failed, transition to failed and capture logs
+        const errorLogs = check_run.output?.text || check_run.output?.summary || "CI Build Failed";
+        
+        await db
+          .update(sessions)
+          .set({
+            status: "failed",
+            lastError: String(errorLogs).substring(0, 1000), // Ensure it fits if it's too long
+          })
+          .where(eq(sessions.id, session.id));
+
+        // Self-Healing Trigger
+        const newSessionId = `remediate-${crypto.randomUUID()}`;
+        await db.insert(sessions).values({
+          id: newSessionId,
+          goalId: session.goalId,
+          sourceRepo: session.sourceRepo,
+          branchName: session.branchName,
+          baseBranch: session.baseBranch,
+          status: "queued",
+          remediationDepth: session.remediationDepth + 1,
+        });
+
+        await LockManager.transferLocks(session.id, newSessionId);
+
+        return Response.json({ received: true, eventType, result: "ci_failed_remediation_triggered", newSessionId });
+      }
+
+      if (check_run.conclusion === "success") {
+        // CI succeeded, trigger semantic auditor
+        await db
+          .update(sessions)
+          .set({ status: "verifying" })
+          .where(eq(sessions.id, session.id));
+
+        after(async () => {
+          try {
+            await reviewWebhookEvent({
+              eventType: "push", // Treat as push to review latest sha
+              owner: repository.owner.login,
+              repo: repository.name,
+              branch: branchName,
+              sha: check_run.head_sha,
+            });
+          } catch (err) {
+            console.error("Auditor error:", err);
+          }
+        });
+
+        return Response.json({ received: true, eventType, result: "verifying_started" });
+      }
+
+      return Response.json({ ignored: true, reason: `Ignored conclusion: ${check_run.conclusion}` }, { status: 202 });
     }
 
     if (eventType === "pull_request") {

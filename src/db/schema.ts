@@ -8,6 +8,7 @@ export interface AcceptanceCriterion {
   id: string;
   text: string;
   met: boolean;
+  reasoning?: string;
   files?: string[];
 }
 
@@ -46,6 +47,7 @@ export const sessions = pgTable("sessions", {
   julesSessionUrl: text("jules_session_url"),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
   lastError: text("last_error"),
+  remediationDepth: integer("remediation_depth").default(0).notNull(),
   branchName: text("branch_name").notNull(),
   baseBranch: text("base_branch").default("main").notNull(),
   status: sessionStatusEnum("status").default("queued").notNull(),

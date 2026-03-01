@@ -12,7 +12,7 @@ export type Goal = {
   id: string;
   title: string;
   description: string | null;
-  acceptanceCriteria: { id: string; text: string; met: boolean; files?: string[] }[];
+  acceptanceCriteria: { id: string; text: string; met: boolean; reasoning?: string; files?: string[] }[];
   reviewArtifacts: ReviewArtifact[];
   status: GoalStatus;
   createdAt: string;

@@ -133,6 +133,17 @@ export class LockManager {
   }
 
   /**
+   * Transfers all locks from an old session to a new session.
+   * Useful for handing off context during self-healing / remediation.
+   */
+  static async transferLocks(oldSessionId: string, newSessionId: string): Promise<void> {
+    await db
+      .update(fileLocks)
+      .set({ sessionId: newSessionId })
+      .where(eq(fileLocks.sessionId, oldSessionId));
+  }
+
+  /**
    * Releases all locks held by a session.
    * (Utility function not explicitly in spec but necessary for cleanup/tests)
    */
