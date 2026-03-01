@@ -9,6 +9,7 @@ import { goals, sessions, cascades, type AcceptanceCriterion } from "@/db/schema
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
 import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
+import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 
 const google = createGoogleGenerativeAI({
@@ -44,11 +45,11 @@ export type ReviewInput = {
 
 export type ReviewResult = {
   outcome:
-    | "review_posted"
-    | "duplicate_commit_skipped"
-    | "no_active_session"
-    | "missing_goal"
-    | "empty_diff_skipped";
+  | "review_posted"
+  | "duplicate_commit_skipped"
+  | "no_active_session"
+  | "missing_goal"
+  | "empty_diff_skipped";
   severity?: z.infer<typeof reviewSchema>["severity"];
   sessionId?: string;
   goalId?: string;
@@ -253,32 +254,59 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
   if (hasFailure) {
     if (session.remediationDepth >= 3) {
       console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id}. Marking goal as drifted.`);
-      
+
       const manualInterventionMsg = "Maximum remediation depth reached. Manual intervention required.";
-      
+
       // Append the manual intervention message to findings or summary
       await db.update(sessions)
-        .set({ 
+        .set({
           status: "failed",
-          lastError: manualInterventionMsg 
+          lastError: manualInterventionMsg
         })
         .where(eq(sessions.id, session.id));
-        
+
       await db.update(goals)
-        .set({ 
+        .set({
           status: "drifted",
-          description: goal.description ? `${goal.description}\n\n${manualInterventionMsg}` : manualInterventionMsg 
+          description: goal.description ? `${goal.description}\n\n${manualInterventionMsg}` : manualInterventionMsg
         })
         .where(eq(goals.id, goal.id));
     } else {
       // Remediation Trigger: Dispatch a new "Fix-up" session
       newSessionId = `remediate-${crypto.randomUUID()}`;
-      const fixPrompt = reviewAnalysis.object.recommendedFixPrompt 
-        ? `\n\nSuggested Fix:\n${reviewAnalysis.object.recommendedFixPrompt}` 
-        : `\n\nFindings:\n${reviewAnalysis.object.findings.join("\n")}`;
 
-      console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
+      // Build a rich, context-aware prompt for the repair agent.
+      const fixContext = reviewAnalysis.object.recommendedFixPrompt
+        ? reviewAnalysis.object.recommendedFixPrompt
+        : reviewAnalysis.object.findings.join("\n");
 
+      const remediationPrompt = [
+        `## Nexus Remediation Task`,
+        ``,
+        `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
+        `**Parent Session:** ${session.id}`,
+        `**Goal:** ${goal.id}`,
+        `**Repository:** ${session.sourceRepo}`,
+        `**Branch:** ${session.branchName}`,
+        ``,
+        `### Auditor Findings`,
+        `**Severity:** ${reviewAnalysis.object.severity.toUpperCase()}`,
+        `**Summary:** ${reviewAnalysis.object.summary}`,
+        ``,
+        `### Required Fix`,
+        fixContext,
+        ``,
+        `### Constraints`,
+        `- Work on the existing branch: \`${session.branchName}\``,
+        `- Only modify files necessary to satisfy the above findings`,
+        `- Do NOT introduce new dependencies unless absolutely required`,
+        `- Ensure TypeScript compiles cleanly after your changes`,
+        `- Commit with message: \`fix: nexus remediation [Nexus-Auto]\``,
+      ].join("\n");
+
+      console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. Depth: ${session.remediationDepth + 1}`);
+
+      // Insert the queued session record and transfer locks atomically.
       await db.transaction(async (tx) => {
         await tx.insert(sessions).values({
           id: newSessionId!,
@@ -290,14 +318,37 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
           remediationDepth: session.remediationDepth + 1,
         });
 
-        // Atomic Handoff: Transfer locks to new session
+        // Atomic Handoff: Transfer file locks to the incoming repair session.
         await LockManager.transferLocks(session.id, newSessionId!, tx);
       });
 
-      // Contextual Repair: Inform orchestrator to dispatch this new session
-      // This could involve calling the Jules sync endpoint or similar
-      // We'll leave the trigger to the background/polling mechanics, or trigger an internal API call here.
-      // For now, it is queued and locks are transferred.
+      // DISPATCH: Eagerly kick off the Jules agent now rather than waiting
+      // for a background poller that may never arrive.
+      try {
+        const julesSession = await julesClient.createSession({
+          prompt: remediationPrompt,
+          sourceRepo: session.sourceRepo,
+          startingBranch: session.baseBranch ?? session.branchName,
+          auditorContext: `remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};goal:${goal.id}`,
+        });
+
+        // Persist the external ID so syncSessionStatus can poll Jules for progress.
+        await db
+          .update(sessions)
+          .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
+          .where(eq(sessions.id, newSessionId!));
+
+        console.log(`🚀 Nexus: Jules remediation agent dispatched. External session: ${julesSession.id}`);
+      } catch (dispatchErr) {
+        // Dispatch failed — mark the new session as failed so it doesn't hang in queued state.
+        const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+        console.error(`❌ Nexus: Failed to dispatch Jules remediation agent:`, dispatchErr);
+        await db
+          .update(sessions)
+          .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
+          .where(eq(sessions.id, newSessionId!));
+      }
+
       remediationTriggered = true;
     }
   }
@@ -305,7 +356,7 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
   if (!remediationTriggered && session.remediationDepth < 3) {
     await db
       .update(sessions)
-      .set({ 
+      .set({
         lastReviewedCommit: input.sha,
         status: hasFailure ? "failed" : "completed",
       })
@@ -313,7 +364,7 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
   } else if (remediationTriggered) {
     await db
       .update(sessions)
-      .set({ 
+      .set({
         lastReviewedCommit: input.sha,
         status: "failed", // The current session failed, a new one was queued
       })
@@ -343,10 +394,10 @@ function extractChangedFilesFromDiff(diff: string): string[] {
   const filePattern = /^diff --git a\/(.+?) b\/(.+?)$/gm;
   const files = new Set<string>();
   let match;
-  
+
   while ((match = filePattern.exec(diff)) !== null) {
     files.add(match[2]);
   }
-  
+
   return Array.from(files);
 }
