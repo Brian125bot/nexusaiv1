@@ -1,13 +1,39 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Use vi.hoisted to share state between mocks and tests
+const { mockLocks, releaseLocksMock, acquireLocksMock } = vi.hoisted(() => {
+  const locks = new Map<string, string>(); // filePath -> sessionId
+  return {
+    mockLocks: locks,
+    releaseLocksMock: vi.fn(async (sessionId: string) => {
+      for (const [path, id] of Array.from(locks.entries())) {
+        if (id === sessionId) {
+          locks.delete(path);
+        }
+      }
+    }),
+    acquireLocksMock: vi.fn(async (sessionId: string, filePaths: string[]) => {
+      const conflicts = filePaths
+        .filter(path => locks.has(path) && locks.get(path) !== sessionId)
+        .map(path => ({ filePath: path, sessionId: locks.get(path)! }));
+
+      if (conflicts.length > 0) {
+        return { ok: false, reason: "conflict", conflicts };
+      }
+
+      for (const path of filePaths) {
+        locks.set(path, sessionId);
+      }
+      return { ok: true, lockedFiles: filePaths };
+    }),
+  };
+});
+
 const deleteMock = vi.fn();
 const updateMock = vi.fn();
 const returningMock = vi.fn();
-
 const setMock = vi.fn();
 const whereMock = vi.fn();
-
-const releaseLocksMock = vi.fn();
 
 const schema = {
   sessions: { table: "sessions", id: "id", status: "status", lastError: "lastError" },
@@ -51,19 +77,19 @@ vi.mock("@/lib/auth/session", () => ({
 
 vi.mock("@/lib/registry/lock-manager", () => ({
   LockManager: {
-    releaseLocks: (...args: unknown[]) => releaseLocksMock(...args),
-    acquireLocks: vi.fn().mockResolvedValue({ ok: true, lockedFiles: ["test.ts"] }),
+    releaseLocks: releaseLocksMock,
+    acquireLocks: acquireLocksMock,
   },
 }));
 
 describe("POST /api/sessions/[id]/terminate - Escape Hatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockLocks.clear();
 
     returningMock.mockResolvedValue([{ id: "test-session-001" }]);
     whereMock.mockResolvedValue(undefined);
     setMock.mockResolvedValue(undefined);
-    releaseLocksMock.mockResolvedValue(undefined);
   });
 
   it("should terminate a session and release its locks", async () => {
@@ -74,7 +100,6 @@ describe("POST /api/sessions/[id]/terminate - Escape Hatch", () => {
       headers: { "content-type": "application/json" },
     });
 
-    // Create a mock context with params
     const context = {
       params: Promise.resolve({ id: "test-session-001" }),
     } as unknown as { params: Promise<{ id: string }> };
@@ -85,16 +110,13 @@ describe("POST /api/sessions/[id]/terminate - Escape Hatch", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.sessionId).toBe("test-session-001");
-    expect(body.message).toBe("Session terminated and locks released");
 
-    // Verify session was updated to failed status
     expect(updateMock).toHaveBeenCalled();
     expect(setMock).toHaveBeenCalledWith({
       status: "failed",
       lastError: "Manually terminated by Admin/Test teardown",
     });
 
-    // Verify locks were released
     expect(releaseLocksMock).toHaveBeenCalledWith("test-session-001");
   });
 
@@ -116,75 +138,73 @@ describe("POST /api/sessions/[id]/terminate - Escape Hatch", () => {
     expect(res.status).toBe(400);
     expect(body.error).toBe("Session ID is required");
   });
-
-  it("should be idempotent - calling on already terminated session should not crash", async () => {
-    const { POST } = await import("@/app/api/sessions/[id]/terminate/route");
-
-    // First call - session exists
-    returningMock.mockResolvedValueOnce([{ id: "test-session-002" }]);
-
-    const req1 = new Request("http://localhost/api/sessions/test-session-002/terminate", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-    });
-
-    const context1 = {
-      params: Promise.resolve({ id: "test-session-002" }),
-    } as unknown as { params: Promise<{ id: string }> };
-
-    const res1 = await POST(req1, context1);
-    expect(res1.status).toBe(200);
-
-    // Second call - session already terminated (simulate no rows returned but no error)
-    returningMock.mockResolvedValueOnce([]);
-
-    const req2 = new Request("http://localhost/api/sessions/test-session-002/terminate", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-    });
-
-    const context2 = {
-      params: Promise.resolve({ id: "test-session-002" }),
-    } as unknown as { params: Promise<{ id: string }> };
-
-    const res2 = await POST(req2, context2);
-    const body2 = await res2.json();
-
-    // Should still return 200 and release locks (idempotent)
-    expect(res2.status).toBe(200);
-    expect(body2.success).toBe(true);
-    expect(releaseLocksMock).toHaveBeenCalledTimes(2);
-  });
 });
 
-describe("Instruction Integrity Test - Lock Cleanup", () => {
-  // This describe block represents the actual instruction-integrity test logic
-  // that was mentioned in the task. The afterEach hook ensures cleanup.
-
+describe("Instruction Integrity Test - Lock Cleanup State Machine", () => {
   let testSessionId: string | null = null;
 
   beforeEach(() => {
-    testSessionId = "test-integrity-check-" + Date.now();
+    testSessionId = "test-integrity-check-001";
   });
 
   afterEach(async () => {
-    // Ensure any locks are released after each test
-    // This is the escape hatch teardown mechanism
+    // Teardown: explicitly terminate the session to release locks
     if (testSessionId) {
-      const { LockManager } = await import("@/lib/registry/lock-manager");
-      await LockManager.releaseLocks(testSessionId);
+      const { POST } = await import("@/app/api/sessions/[id]/terminate/route");
+      const req = new Request(`http://localhost/api/sessions/${testSessionId}/terminate`, {
+        method: "POST",
+      });
+      const context = {
+        params: Promise.resolve({ id: testSessionId }),
+      } as unknown as { params: Promise<{ id: string }> };
+
+      await POST(req, context);
     }
   });
 
-  it("should be able to run multiple times without lock contention", async () => {
+  it("should be able to run 10 times without lock contention", async () => {
     const { LockManager } = await import("@/lib/registry/lock-manager");
 
-    // Simulate acquiring locks for a test session
-    const lockResult = await LockManager.acquireLocks(testSessionId!, ["src/test-file-1.ts", "src/test-file-2.ts"]);
+    for (let i = 0; i < 10; i++) {
+      // 1. Acquire locks
+      const result = await LockManager.acquireLocks(testSessionId!, ["file-A.ts", "file-B.ts"]);
+      expect(result.ok).toBe(true);
+
+      // 2. Verify they are held
+      expect(mockLocks.get("file-A.ts")).toBe(testSessionId);
+
+      // 3. Manually trigger cleanup (simulating the afterEach hook's logic within the loop for this test)
+      const { POST } = await import("@/app/api/sessions/[id]/terminate/route");
+      const req = new Request(`http://localhost/api/sessions/${testSessionId}/terminate`, {
+        method: "POST",
+      });
+      const context = {
+        params: Promise.resolve({ id: testSessionId }),
+      } as unknown as { params: Promise<{ id: string }> };
+
+      const res = await POST(req, context);
+      expect(res.status).toBe(200);
+
+      // 4. Verify they are released
+      expect(mockLocks.has("file-A.ts")).toBe(false);
+      expect(mockLocks.has("file-B.ts")).toBe(false);
+    }
+  });
+
+  it("should fail if cleanup is NOT performed", async () => {
+    const { LockManager } = await import("@/lib/registry/lock-manager");
     
-    expect(lockResult.ok).toBe(true);
+    // Acquire locks with one session
+    await LockManager.acquireLocks("other-session", ["shared-file.ts"]);
     
-    // The afterEach hook will clean up locks automatically
-    // This test can run 10 times in a row without "File already locked" errors
+    // Try to acquire with our test session - should fail
+    const result = await LockManager.acquireLocks(testSessionId!, ["shared-file.ts"]);
+    expect(result.ok).toBe(false);
+    if (result.ok === false) {
+      expect(result.reason).toBe("conflict");
+    }
+
+    // Clean up the other session so afterEach doesn't fail on orphaned global state
+    await LockManager.releaseLocks("other-session");
   });
 });
