@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import useSWR from "swr";
+import useSWR, { mutate } from "swr";
 
 import { AuditorReport } from "@/components/dashboard/auditor-report";
 import { fetcher, jsonRequest } from "@/lib/ui/fetcher";
@@ -32,6 +32,7 @@ export function SessionList() {
   });
   const [reportState, setReportState] = useState<AuditorReportState>(() => initialAuditorReportState());
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [abortingSessionIds, setAbortingSessionIds] = useState<string[]>([]);
 
   const activeSessions = useMemo(() => sessionsData?.sessions ?? [], [sessionsData?.sessions]);
   const goals = useMemo(() => goalsData?.goals ?? [], [goalsData?.goals]);
@@ -174,6 +175,36 @@ export function SessionList() {
     }
   };
 
+  const handleAbort = async (sessionId: string) => {
+    setAbortingSessionIds((prev) => (prev.includes(sessionId) ? prev : [...prev, sessionId]));
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/terminate`, { method: "POST" });
+      if (!response.ok) {
+        let message = `Failed to abort session: ${response.status}`;
+        try {
+          const body = (await response.json()) as { error?: string };
+          if (body.error) {
+            message = body.error;
+          }
+        } catch {
+          // Fall back to default message when JSON parsing fails.
+        }
+        throw new Error(message);
+      }
+
+      await Promise.all([
+        mutateSessions(),
+        mutateLocks(),
+        mutate(swrKeys.activeSessions),
+        mutate(swrKeys.locks),
+      ]);
+    } catch (error) {
+      console.error("Failed to abort session", error);
+    } finally {
+      setAbortingSessionIds((prev) => prev.filter((id) => id !== sessionId));
+    }
+  };
+
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4 md:p-6">
@@ -264,6 +295,16 @@ export function SessionList() {
                 <p className="text-sm font-semibold text-slate-100">{session.branchName}</p>
                 <p className="text-xs text-slate-400">{session.sourceRepo}</p>
                 <p className="mt-1 text-xs text-slate-300">Status: {session.status}</p>
+                {session.status === "executing" || session.status === "verifying" ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleAbort(session.id)}
+                    disabled={abortingSessionIds.includes(session.id)}
+                    className="mt-2 rounded-lg border border-rose-500 px-3 py-1.5 text-xs font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {abortingSessionIds.includes(session.id) ? "Aborting..." : "Abort"}
+                  </button>
+                ) : null}
                 {session.julesSessionUrl ? (
                   <a
                     href={session.julesSessionUrl}
