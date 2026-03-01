@@ -251,41 +251,72 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
   let newSessionId: string | undefined;
 
   if (hasFailure) {
-    // Remediation Trigger: Dispatch a new "Fix-up" session
-    newSessionId = `remediate-${crypto.randomUUID()}`;
-    const fixPrompt = reviewAnalysis.object.recommendedFixPrompt 
-      ? `\n\nSuggested Fix:\n${reviewAnalysis.object.recommendedFixPrompt}` 
-      : `\n\nFindings:\n${reviewAnalysis.object.findings.join("\n")}`;
+    if (session.remediationDepth >= 3) {
+      console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id}. Marking goal as drifted.`);
+      
+      const manualInterventionMsg = "Maximum remediation depth reached. Manual intervention required.";
+      
+      // Append the manual intervention message to findings or summary
+      await db.update(sessions)
+        .set({ 
+          status: "failed",
+          lastError: manualInterventionMsg 
+        })
+        .where(eq(sessions.id, session.id));
+        
+      await db.update(goals)
+        .set({ 
+          status: "drifted",
+          description: goal.description ? `${goal.description}\n\n${manualInterventionMsg}` : manualInterventionMsg 
+        })
+        .where(eq(goals.id, goal.id));
+    } else {
+      // Remediation Trigger: Dispatch a new "Fix-up" session
+      newSessionId = `remediate-${crypto.randomUUID()}`;
+      const fixPrompt = reviewAnalysis.object.recommendedFixPrompt 
+        ? `\n\nSuggested Fix:\n${reviewAnalysis.object.recommendedFixPrompt}` 
+        : `\n\nFindings:\n${reviewAnalysis.object.findings.join("\n")}`;
 
-    console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
+      console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
 
-    await db.insert(sessions).values({
-      id: newSessionId,
-      goalId: goal.id,
-      sourceRepo: session.sourceRepo,
-      branchName: session.branchName,
-      baseBranch: session.baseBranch,
-      status: "queued",
-      remediationDepth: session.remediationDepth + 1,
-    });
+      await db.insert(sessions).values({
+        id: newSessionId,
+        goalId: goal.id,
+        sourceRepo: session.sourceRepo,
+        branchName: session.branchName,
+        baseBranch: session.baseBranch,
+        status: "queued",
+        remediationDepth: session.remediationDepth + 1,
+      });
 
-    // Atomic Handoff: Transfer locks to new session
-    await LockManager.transferLocks(session.id, newSessionId);
+      // Atomic Handoff: Transfer locks to new session
+      await LockManager.transferLocks(session.id, newSessionId);
 
-    // Contextual Repair: Inform orchestrator to dispatch this new session
-    // This could involve calling the Jules sync endpoint or similar
-    // We'll leave the trigger to the background/polling mechanics, or trigger an internal API call here.
-    // For now, it is queued and locks are transferred.
-    remediationTriggered = true;
+      // Contextual Repair: Inform orchestrator to dispatch this new session
+      // This could involve calling the Jules sync endpoint or similar
+      // We'll leave the trigger to the background/polling mechanics, or trigger an internal API call here.
+      // For now, it is queued and locks are transferred.
+      remediationTriggered = true;
+    }
   }
 
-  await db
-    .update(sessions)
-    .set({ 
-      lastReviewedCommit: input.sha,
-      status: hasFailure ? "failed" : "completed",
-    })
-    .where(eq(sessions.id, session.id));
+  if (!remediationTriggered && session.remediationDepth < 3) {
+    await db
+      .update(sessions)
+      .set({ 
+        lastReviewedCommit: input.sha,
+        status: hasFailure ? "failed" : "completed",
+      })
+      .where(eq(sessions.id, session.id));
+  } else if (remediationTriggered) {
+    await db
+      .update(sessions)
+      .set({ 
+        lastReviewedCommit: input.sha,
+        status: "failed", // The current session failed, a new one was queued
+      })
+      .where(eq(sessions.id, session.id));
+  }
 
   return {
     outcome: "review_posted",

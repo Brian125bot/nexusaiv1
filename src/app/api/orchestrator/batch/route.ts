@@ -68,6 +68,7 @@ export async function POST(req: Request) {
             id: randomUUID(),
             text: job.prompt,
             met: false,
+            reasoning: null,
           })),
           status: "in-progress" as const,
         })

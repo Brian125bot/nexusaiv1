@@ -4,11 +4,12 @@ import { after } from "next/server";
 import crypto from "crypto";
 
 import { db } from "@/db";
-import { sessions } from "@/db/schema";
+import { sessions, goals } from "@/db/schema";
 import { reviewWebhookEvent } from "@/lib/auditor/auto-reviewer";
 import { CORE_FILES, isCoreFile } from "@/lib/cascade-config";
 import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
 import { LockManager } from "@/lib/registry/lock-manager";
+import { githubClient } from "@/lib/github/octokit";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,7 @@ const checkRunEventSchema = z.object({
     owner: z.object({ login: z.string().min(1) }),
   }),
   check_run: z.object({
+    id: z.number().int().positive(),
     head_sha: z.string(),
     status: z.string(),
     conclusion: z.string().nullable(),
@@ -245,16 +247,32 @@ export async function POST(req: Request) {
       }
 
       if (check_run.conclusion === "failure") {
-        // CI failed, transition to failed and capture logs
-        const errorLogs = check_run.output?.text || check_run.output?.summary || "CI Build Failed";
+        // CI failed, fetch raw logs from GitHub Actions if possible
+        const rawLogs = await githubClient.getCheckRunLogs(
+          repository.owner.login,
+          repository.name,
+          check_run.id
+        );
+
+        const errorLogs = rawLogs || check_run.output?.text || check_run.output?.summary || "CI Build Failed";
         
         await db
           .update(sessions)
           .set({
             status: "failed",
-            lastError: String(errorLogs).substring(0, 1000), // Ensure it fits if it's too long
+            lastError: String(errorLogs).substring(0, 5000), // Ensure we capture more context if available
           })
           .where(eq(sessions.id, session.id));
+
+        if (session.remediationDepth >= 3) {
+          console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id} after CI failure.`);
+          if (session.goalId) {
+            await db.update(goals)
+              .set({ status: "drifted" })
+              .where(eq(goals.id, session.goalId));
+          }
+          return Response.json({ received: true, eventType, result: "ci_failed_max_remediation_depth_reached" });
+        }
 
         // Self-Healing Trigger
         const newSessionId = `remediate-${crypto.randomUUID()}`;

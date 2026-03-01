@@ -17,6 +17,7 @@ export class GoalManager {
       id: randomUUID(),
       text,
       met: false,
+      reasoning: null,
     }));
 
     const result = await db.insert(goals).values({

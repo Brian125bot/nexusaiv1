@@ -24,8 +24,8 @@ describe("GoalManager", () => {
     expect(goal).toBeDefined();
     expect(goal?.title).toBe(title);
     expect(goal?.acceptanceCriteria).toMatchObject([
-      { text: "No hardcoded secrets", met: false },
-      { text: "Uses Lucia Auth", met: false }
+      { text: "No hardcoded secrets", met: false, reasoning: null },
+      { text: "Uses Lucia Auth", met: false, reasoning: null }
     ]);
   });
 
