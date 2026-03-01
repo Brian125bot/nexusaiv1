@@ -160,9 +160,29 @@ export function GoalBoard() {
                   {goal.description ? (
                     <p className="mt-1 text-xs text-slate-400">{goal.description}</p>
                   ) : null}
-                  <ul className="mt-2 space-y-1 text-xs text-slate-300">
+                  <ul className="mt-2 space-y-2 text-xs text-slate-300">
                     {goal.acceptanceCriteria.map((criterion) => (
-                      <li key={criterion}>• {criterion}</li>
+                      <li key={criterion.id} className="flex flex-col gap-1">
+                        <div className="flex items-start gap-1.5" title={criterion.reasoning}>
+                          <span>{criterion.met ? "✅" : "⏳"}</span>
+                          <span className={criterion.met ? "text-slate-300" : "text-slate-400 italic"}>
+                            {criterion.text}
+                          </span>
+                        </div>
+                        {criterion.files && criterion.files.length > 0 && (
+                          <div className="ml-5 flex flex-wrap gap-1">
+                            {criterion.files.map((file) => (
+                              <span
+                                key={file}
+                                className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 border border-slate-700"
+                                title={file}
+                              >
+                                {file.split("/").pop()}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </li>
                     ))}
                   </ul>
                   <div className="mt-2 space-y-1 text-xs text-slate-300">

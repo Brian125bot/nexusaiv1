@@ -5,15 +5,18 @@ export const sessionStatusEnum = pgEnum("session_status", ["queued", "executing"
 export const cascadeStatusEnum = pgEnum("cascade_status", ["analyzing", "dispatched", "completed", "failed"]);
 
 export interface AcceptanceCriterion {
+  id: string;
   text: string;
   met: boolean;
+  reasoning?: string;
+  files?: string[];
 }
 
 export const goals = pgTable("goals", {
   id: uuid("id").primaryKey().defaultRandom(),
   title: text("title").notNull(),
   description: text("description"),
-  acceptanceCriteria: jsonb("acceptance_criteria").$type<(string | AcceptanceCriterion)[]>().default([]).notNull(),
+  acceptanceCriteria: jsonb("acceptance_criteria").$type<AcceptanceCriterion[]>().default([]).notNull(),
   reviewArtifacts: jsonb("review_artifacts")
     .$type<Array<{ type: "pull_request"; url: string; sessionExternalId: string; createdAt: string }>>()
     .default([])
@@ -44,6 +47,7 @@ export const sessions = pgTable("sessions", {
   julesSessionUrl: text("jules_session_url"),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
   lastError: text("last_error"),
+  remediationDepth: integer("remediation_depth").default(0).notNull(),
   branchName: text("branch_name").notNull(),
   baseBranch: text("base_branch").default("main").notNull(),
   status: sessionStatusEnum("status").default("queued").notNull(),

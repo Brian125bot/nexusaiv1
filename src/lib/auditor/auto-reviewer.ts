@@ -2,12 +2,14 @@ import { generateObject } from "ai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
+import crypto from "crypto";
 
 import { db } from "@/db";
-import { goals, sessions, cascades } from "@/db/schema";
+import { goals, sessions, cascades, type AcceptanceCriterion } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
 import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
+import { LockManager } from "@/lib/registry/lock-manager";
 
 const google = createGoogleGenerativeAI({
   apiKey: aiEnv.GOOGLE_GENERATIVE_AI_API_KEY,
@@ -21,6 +23,14 @@ const reviewSchema = z.object({
   summary: z.string().min(1),
   findings: z.array(z.string().min(1)).default([]),
   recommendedFixPrompt: z.string().min(1).optional(),
+  criteriaAssessment: z.record(
+    z.string(),
+    z.object({
+      met: z.boolean(),
+      reasoning: z.string(),
+      evidenceFiles: z.array(z.string()),
+    })
+  ).optional(),
 });
 
 export type ReviewInput = {
@@ -48,6 +58,8 @@ export type ReviewResult = {
     coreFilesChanged: string[];
     repairJobCount: number;
   };
+  remediationTriggered?: boolean;
+  newSessionId?: string;
 };
 
 function buildReviewComment(input: {
@@ -155,7 +167,7 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
       model: google(AUDITOR_MODEL),
       schema: reviewSchema,
       system:
-        "You are the Nexus Auditor. Review this diff against the project's Acceptance Criteria. Identify any architectural drift, hardcoded secrets, or logic errors.",
+        "You are the Nexus Auditor. Review this diff against the project's Acceptance Criteria. Identify any architectural drift, hardcoded secrets, or logic errors. Evaluate if each criterion in the provided list has been met based on the diff. In `criteriaAssessment`, provide an object mapped by criterion `id` containing `met`, `reasoning`, and `evidenceFiles` (paths of files proving the state).",
       prompt: [
         `Repository: ${sourceRepo}`,
         `Branch: ${input.branch}`,
@@ -175,6 +187,33 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     }),
     analyzeCascade(fileChanges),
   ]);
+
+  const assessment = reviewAnalysis.object.criteriaAssessment;
+  let hasFailure = false;
+
+  // Update Goal Acceptance Criteria
+  if (assessment && goal.acceptanceCriteria && Array.isArray(goal.acceptanceCriteria)) {
+    const criteria = goal.acceptanceCriteria as AcceptanceCriterion[];
+    const updatedCriteria = criteria.map((c) => {
+      const result = assessment[c.id];
+      if (result) {
+        if (!result.met) hasFailure = true;
+        return {
+          ...c,
+          met: result.met,
+          reasoning: result.reasoning,
+          files: result.evidenceFiles,
+        };
+      }
+      return c;
+    });
+
+    await db.update(goals)
+      .set({ acceptanceCriteria: updatedCriteria })
+      .where(eq(goals.id, goal.id));
+  } else if (reviewAnalysis.object.severity === "major") {
+    hasFailure = true;
+  }
 
   const comment = buildReviewComment({
     severity: reviewAnalysis.object.severity,
@@ -208,10 +247,43 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     }).onConflictDoNothing();
   }
 
+  let remediationTriggered = false;
+  let newSessionId: string | undefined;
+
+  if (hasFailure) {
+    // Remediation Trigger: Dispatch a new "Fix-up" session
+    newSessionId = `remediate-${crypto.randomUUID()}`;
+    const fixPrompt = reviewAnalysis.object.recommendedFixPrompt 
+      ? `\n\nSuggested Fix:\n${reviewAnalysis.object.recommendedFixPrompt}` 
+      : `\n\nFindings:\n${reviewAnalysis.object.findings.join("\n")}`;
+
+    console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. New session: ${newSessionId}. Reasoning: ${fixPrompt}`);
+
+    await db.insert(sessions).values({
+      id: newSessionId,
+      goalId: goal.id,
+      sourceRepo: session.sourceRepo,
+      branchName: session.branchName,
+      baseBranch: session.baseBranch,
+      status: "queued",
+      remediationDepth: session.remediationDepth + 1,
+    });
+
+    // Atomic Handoff: Transfer locks to new session
+    await LockManager.transferLocks(session.id, newSessionId);
+
+    // Contextual Repair: Inform orchestrator to dispatch this new session
+    // This could involve calling the Jules sync endpoint or similar
+    // We'll leave the trigger to the background/polling mechanics, or trigger an internal API call here.
+    // For now, it is queued and locks are transferred.
+    remediationTriggered = true;
+  }
+
   await db
     .update(sessions)
     .set({ 
       lastReviewedCommit: input.sha,
+      status: hasFailure ? "failed" : "completed",
     })
     .where(eq(sessions.id, session.id));
 
@@ -226,6 +298,8 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
       coreFilesChanged: cascadeResult.coreFilesChanged,
       repairJobCount: cascadeResult.repairJobs.length,
     },
+    remediationTriggered,
+    newSessionId,
   };
 }
 

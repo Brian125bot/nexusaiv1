@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 
@@ -98,6 +99,7 @@ export async function POST(req: Request) {
               title: `Cascade Repair: ${analysis.coreFilesChanged.join(", ")}`,
               description: `Automated cascade repair triggered by commit ${commitSha.slice(0, 8)}`,
               acceptanceCriteria: analysis.repairJobs.map(job => ({
+                id: randomUUID(),
                 text: job.prompt,
                 met: false,
                 files: job.files,

@@ -23,7 +23,10 @@ describe("GoalManager", () => {
     const goal = await GoalManager.getGoal(goalId);
     expect(goal).toBeDefined();
     expect(goal?.title).toBe(title);
-    expect(goal?.acceptanceCriteria).toEqual(criteria);
+    expect(goal?.acceptanceCriteria).toMatchObject([
+      { text: "No hardcoded secrets", met: false },
+      { text: "Uses Lucia Auth", met: false }
+    ]);
   });
 
   it("should update goal progress", async () => {
@@ -34,12 +37,11 @@ describe("GoalManager", () => {
     await GoalManager.updateGoalProgress(goalId, 0, true);
     
     const updatedGoal = await GoalManager.getGoal(goalId);
-    const updatedCriteria = updatedGoal?.acceptanceCriteria as (string | AcceptanceCriterion)[];
+    const updatedCriteria = updatedGoal?.acceptanceCriteria as AcceptanceCriterion[];
     const firstItem = updatedCriteria[0];
     
-    // Check if it was converted to an object or handled correctly
     expect(typeof firstItem).toBe("object");
-    expect((firstItem as AcceptanceCriterion).met).toBe(true);
-    expect((firstItem as AcceptanceCriterion).text).toBe("Criteria 1");
+    expect(firstItem.met).toBe(true);
+    expect(firstItem.text).toBe("Criteria 1");
   });
 });
