@@ -70,7 +70,7 @@ export class JulesClient {
 
   async createSession(input: JulesCreateSessionInput): Promise<{ id: string; url: string }> {
     const payload = {
-      prompt: `${input.prompt}\n\nAuditor context:\n${input.auditorContext}`,
+      prompt: `${input.prompt}\n\n--- AUDITOR CONTEXT ---\n${input.auditorContext}\n--- END AUDITOR CONTEXT ---`,
       sourceContext: {
         source: `sources/github/${input.sourceRepo}`,
         githubRepoContext: {
