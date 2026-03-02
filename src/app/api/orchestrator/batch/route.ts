@@ -104,7 +104,10 @@ export async function POST(req: Request) {
           status: "queued",
         });
 
-        const lockResult = await LockManager.acquireLocks(internalSessionId, job.files);
+        const lockResult = await LockManager.acquireLocks(
+          internalSessionId,
+          job.files.map(filePath => ({ filePath, type: "exclusive" as const }))
+        );
         if (!lockResult.ok) {
           const conflictMessage = `Lock conflict on ${lockResult.conflicts.map((conflict) => conflict.filePath).join(", ")}`;
           await db

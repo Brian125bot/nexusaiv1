@@ -141,6 +141,7 @@ export async function POST(req: Request) {
                 sessionId: fileLocks.sessionId,
                 filePath: fileLocks.filePath,
                 lockedAt: fileLocks.lockedAt,
+                type: fileLocks.type,
                 sessionStatus: sessions.status,
                 branchName: sessions.branchName,
                 baseBranch: sessions.baseBranch,
@@ -216,6 +217,7 @@ export async function POST(req: Request) {
                 uniqueImpactFiles.map((filePath) => ({
                   sessionId: internalSessionId,
                   filePath,
+                  type: "exclusive" as const,
                 })),
               );
 

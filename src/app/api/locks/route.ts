@@ -25,6 +25,7 @@ export async function GET(req: Request) {
         filePath: fileLocks.filePath,
         lockedAt: fileLocks.lockedAt,
         sessionId: fileLocks.sessionId,
+        type: fileLocks.type,
         branchName: sessions.branchName,
         baseBranch: sessions.baseBranch,
         julesSessionUrl: sessions.julesSessionUrl,

@@ -26,7 +26,7 @@ describe("LockManager", () => {
 
   it("should successfully lock a file", async () => {
     const filePath = "/src/app/page.tsx";
-    const result = await LockManager.requestLock(TEST_SESSION_1, [filePath]);
+    const result = await LockManager.requestLock(TEST_SESSION_1, [{ filePath, type: "exclusive" }]);
     expect(result).toBe(true);
     
     const conflicts = await LockManager.getConflictStatus([filePath]);
@@ -36,13 +36,13 @@ describe("LockManager", () => {
 
   it("should fail to lock an already locked file by another session", async () => {
     const filePath = "/src/app/page.tsx"; // Already locked by session 1
-    const result = await LockManager.requestLock(TEST_SESSION_2, [filePath]);
+    const result = await LockManager.requestLock(TEST_SESSION_2, [{ filePath, type: "exclusive" }]);
     expect(result).toBe(false);
   });
 
   it("should return conflict metadata from acquireLocks", async () => {
     const filePath = "/src/app/page.tsx";
-    const result = await LockManager.acquireLocks(TEST_SESSION_2, [filePath]);
+    const result = await LockManager.acquireLocks(TEST_SESSION_2, [{ filePath, type: "exclusive" }]);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("conflict");
@@ -52,13 +52,13 @@ describe("LockManager", () => {
 
   it("should allow the same session to lock the same file again (idempotent-ish)", async () => {
     const filePath = "/src/app/page.tsx";
-    const result = await LockManager.requestLock(TEST_SESSION_1, [filePath]);
+    const result = await LockManager.requestLock(TEST_SESSION_1, [{ filePath, type: "exclusive" }]);
     expect(result).toBe(true);
   });
 
   it("should allow locking multiple files at once", async () => {
     const filePaths = ["/src/lib/utils.ts", "/src/lib/db.ts"];
-    const result = await LockManager.requestLock(TEST_SESSION_2, filePaths);
+    const result = await LockManager.requestLock(TEST_SESSION_2, filePaths.map(p => ({ filePath: p, type: "exclusive" as const })));
     expect(result).toBe(true);
 
     const conflicts = await LockManager.getConflictStatus(filePaths);
@@ -68,7 +68,7 @@ describe("LockManager", () => {
 
   it("should fail if ANY file in the batch is locked by another session", async () => {
     const filePaths = ["/src/app/layout.tsx", "/src/app/page.tsx"]; // page.tsx is locked by session 1
-    const result = await LockManager.requestLock(TEST_SESSION_2, filePaths);
+    const result = await LockManager.requestLock(TEST_SESSION_2, filePaths.map(p => ({ filePath: p, type: "exclusive" as const })));
     expect(result).toBe(false);
 
     // layout.tsx should NOT have been locked
