@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const cascadeRequestSchema = z.object({
+const initialCascadeSchema = z.object({
+  type: z.literal("initial").optional().default("initial"),
   sourceRepo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   branch: z.string().min(1),
   commitSha: z.string().min(1),
@@ -15,11 +16,24 @@ export const cascadeRequestSchema = z.object({
   autoDispatch: z.boolean().default(false),
 });
 
+const remediationCascadeSchema = z.object({
+  type: z.literal("remediation"),
+  sessionId: z.string().min(1),
+  logs: z.string(),
+});
+
+export const cascadeRequestSchema = z.discriminatedUnion("type", [
+  initialCascadeSchema,
+  remediationCascadeSchema,
+]);
+
+export type CascadeRequest = z.infer<typeof cascadeRequestSchema>;
+
 export const cascadeResponseSchema = z.object({
-  cascadeId: z.string(),
-  isCascade: z.boolean(),
-  coreFilesChanged: z.array(z.string()),
-  downstreamFiles: z.array(z.string()),
+  cascadeId: z.string().optional(),
+  isCascade: z.boolean().optional(),
+  coreFilesChanged: z.array(z.string()).optional(),
+  downstreamFiles: z.array(z.string()).optional(),
   repairJobs: z.array(
     z.object({
       id: z.string(),
@@ -28,18 +42,18 @@ export const cascadeResponseSchema = z.object({
       priority: z.enum(["high", "medium", "low"]),
       estimatedImpact: z.string(),
     }),
-  ),
+  ).optional(),
   dispatchedSessions: z
     .array(
       z.object({
-        jobId: z.string(),
+        jobId: z.string().optional(),
         sessionId: z.string(),
         status: z.string(),
       }),
     )
     .optional(),
-  summary: z.string(),
-  confidence: z.number(),
+  summary: z.string().optional(),
+  confidence: z.number().optional(),
   telemetry: z
     .object({
       dispatchLatencyMs: z.number().int().nonnegative(),
@@ -48,6 +62,7 @@ export const cascadeResponseSchema = z.object({
       failedCount: z.number().int().nonnegative(),
     })
     .optional(),
+  result: z.string().optional(), // For remediation responses
 });
 
 export const batchDispatchSchema = z.object({

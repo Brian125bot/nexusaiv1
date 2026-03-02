@@ -239,3 +239,157 @@ export async function dispatchCascadeRepairs(
 export function detectCoreFileChanges(filePaths: string[]): string[] {
   return filePaths.filter(isCoreFile);
 }
+
+import { db } from "@/db";
+import { sessions, cascades, AcceptanceCriterion } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { githubClient } from "@/lib/github/octokit";
+import { LockManager } from "@/lib/registry/lock-manager";
+import crypto from "crypto";
+
+/**
+ * Autonomously remediate a failed CI session by dispatching a new repair agent.
+ */
+export async function autoRemediate(sessionId: string, logs: string) {
+  console.log(`[Ouroboros] Failure Detected in Session ${sessionId}. Dispatching recursive repair agent.`);
+
+  const session = await db.query.sessions.findFirst({
+    where: eq(sessions.id, sessionId),
+    with: {
+      goal: true,
+    },
+  });
+
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found`);
+  }
+
+  if (session.remediationDepth >= 3) {
+    throw new Error(`Max remediation depth reached (3) for session ${sessionId}`);
+  }
+
+  let prDiff = "";
+  try {
+    // Try to find if this branch has an open PR. If so, get PR diff.
+    // PR matching logic fallback // In case branch name explicitly tracks PR
+
+    // We can also just search repo pulls if needed, but for simplicity, let's try getting commit diff
+    // against the base branch as the fallback.
+    // In a real app we might query GitHub for open PRs by branch name.
+
+    // Let's get the diff from base branch to current branch
+    prDiff = await githubClient.getDiff(
+      session.sourceRepo.split('/')[0],
+      session.sourceRepo.split('/')[1],
+      { type: 'commit', base: session.baseBranch, head: session.branchName }
+    );
+  } catch (error) {
+    console.warn(`[Ouroboros] Failed to get diff for ${session.sourceRepo} ${session.branchName}, falling back to empty diff`, error);
+  }
+
+  const acs = session.goal ? (session.goal as unknown as { acceptanceCriteria: AcceptanceCriterion[] }).acceptanceCriteria : [];
+
+  const prompt = [
+    `## Nexus Architectural Self-Healing`,
+    ``,
+    `**Goal:** ${session.goal ? (session.goal as unknown as { title: string }).title : 'System Stability'}`,
+    `**Acceptance Criteria:**\n${acs.map((ac: AcceptanceCriterion) => `- [${ac.met ? 'x' : ' '}] ${ac.text}`).join('\n')}`,
+    ``,
+    `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
+    `**Parent Session:** ${session.id}`,
+    `**Repository:** ${session.sourceRepo}`,
+    `**Branch:** ${session.branchName}`,
+    ``,
+    `### Diff That Caused Failure`,
+    "```diff",
+    prDiff.substring(0, 10000), // truncate diff if too large
+    "```",
+    ``,
+    `### CI Failure Logs`,
+    "```",
+    String(logs).substring(0, 8000),
+    "```",
+    ``,
+    `### Your Task`,
+    `Analyze the CI failure logs provided above along with the Diff. You must fix the root cause of the error.`,
+    ``,
+    `### Constraints`,
+    `- Work on the existing branch: \`${session.branchName}\``,
+    `- Only modify files required to fix the CI failure`,
+    `- Ensure you respect existing file locks in the repository`,
+    `- Do NOT introduce new dependencies unless absolutely required`,
+    `- Ensure TypeScript compiles cleanly after your changes`,
+    `- Commit with message: \`fix: auto-remediation [Nexus-Auto]\``,
+  ].join("\n");
+
+  const newSessionId = `remediate-${crypto.randomUUID()}`;
+
+  // Execute an atomic handoff of context and locks
+  await db.transaction(async (tx) => {
+    // Create new child session
+    await tx.insert(sessions).values({
+      id: newSessionId,
+      goalId: session.goalId,
+      sourceRepo: session.sourceRepo,
+      branchName: session.branchName,
+      baseBranch: session.baseBranch,
+      status: "queued",
+      remediationDepth: session.remediationDepth + 1,
+    });
+
+    // Link lineage in cascades if applicable, or rely on remediationDepth
+    if (session.cascadeId) {
+       await tx.update(sessions)
+         .set({ cascadeId: session.cascadeId })
+         .where(eq(sessions.id, newSessionId));
+    } else {
+       // Insert a record into the cascades table linking the failed parentSessionId to the new childSessionId.
+       const newCascadeId = `cascade_remediate_${sessionId}_${Date.now()}`;
+       await tx.insert(cascades).values({
+         id: newCascadeId,
+         triggerSessionId: sessionId,
+         summary: `Auto-remediation cascade for session ${sessionId}`,
+         status: "analyzing",
+       }).onConflictDoNothing();
+
+       await tx.update(sessions)
+         .set({ cascadeId: newCascadeId })
+         .where(eq(sessions.id, newSessionId));
+    }
+
+    // Transfer locks
+    await LockManager.transferLocks(session.id, newSessionId, tx);
+  });
+
+  try {
+    const julesSession = await julesClient.createSession({
+      prompt,
+      sourceRepo: session.sourceRepo,
+      startingBranch: session.branchName,
+      auditorContext: `auto-remediate;parentSession:${session.id};depth:${session.remediationDepth + 1}`,
+    });
+
+    await db
+      .update(sessions)
+      .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
+      .where(eq(sessions.id, newSessionId));
+
+    console.log(`🚀 [Ouroboros] Jules remediation agent dispatched. External session: ${julesSession.id}`);
+
+    return {
+      success: true,
+      newSessionId,
+      externalSessionId: julesSession.id,
+      message: `Dispatched remediation session for ${sessionId}`
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`❌ [Ouroboros] Failed to dispatch Jules agent:`, err);
+    await db
+      .update(sessions)
+      .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
+      .where(eq(sessions.id, newSessionId));
+
+    throw err;
+  }
+}
