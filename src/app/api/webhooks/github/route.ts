@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { after } from "next/server";
-import crypto from "crypto";
 
 import { db } from "@/db";
 import { sessions, goals } from "@/db/schema";
@@ -10,7 +9,6 @@ import { CORE_FILES, isCoreFile } from "@/lib/cascade-config";
 import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { githubClient } from "@/lib/github/octokit";
-import { julesClient } from "@/lib/jules/client";
 
 export const runtime = "nodejs";
 
@@ -289,73 +287,38 @@ export async function POST(req: Request) {
               return; // Stop early
             }
 
-            const newSessionId = `remediate-${crypto.randomUUID()}`;
 
-            // Build a CI-context-aware prompt so the repair agent knows exactly what broke.
-            const ciRemediationPrompt = [
-              `## Nexus CI Failure Remediation`,
-              ``,
-              `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
-              `**Parent Session:** ${session.id}`,
-              `**Repository:** ${session.sourceRepo}`,
-              `**Branch:** ${branchName || session.branchName}`,
-              `**Failed Check Run ID:** ${check_run.id}`,
-              `**Commit SHA:** ${check_run.head_sha}`,
-              ``,
-              `### CI Failure Logs`,
-              "```",
-              String(errorLogs).substring(0, 8000),
-              "```",
-              ``,
-              `### Your Task`,
-              `Analyse the CI failure logs provided above and fix the root cause.`,
-              ``,
-              `### Constraints`,
-              `- Work on the existing branch: \`${branchName || session.branchName}\``,
-              `- Only modify files required to fix the CI failure`,
-              `- Do NOT introduce new dependencies unless absolutely required`,
-              `- Ensure TypeScript compiles cleanly after your changes`,
-              `- Commit with message: \`fix: ci remediation [Nexus-Auto]\``,
-            ].join("\n");
+            // Fetch the internal analyze endpoint directly via localhost since we are the server
+            // We use the triggerCascadeAnalyze pattern
+            const endpoint = new URL("/api/cascade/analyze", req.url);
+            const headers = new Headers({ "content-type": "application/json" });
+            const authHeader = req.headers.get("authorization");
+            const cookieHeader = req.headers.get("cookie");
 
-            await db.transaction(async (tx) => {
-              await tx.insert(sessions).values({
-                id: newSessionId,
-                goalId: session.goalId,
-                sourceRepo: session.sourceRepo,
-                branchName: branchName || session.branchName,
-                baseBranch: session.baseBranch,
-                status: "queued",
-                remediationDepth: session.remediationDepth + 1,
-              });
+            if (authHeader) headers.set("authorization", authHeader);
+            if (cookieHeader) headers.set("cookie", cookieHeader);
 
-              await LockManager.transferLocks(session.id, newSessionId, tx);
+            // Pass the logs and session ID to the analyze route for Ouroboros remediation
+            const response = await fetch(endpoint.toString(), {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                type: "remediation",
+                sessionId: session.id,
+                logs: String(errorLogs)
+              }),
             });
 
-            // DISPATCH: Eagerly kick off the Jules agent so the session doesn't hang forever in queued.
-            try {
-              const julesSession = await julesClient.createSession({
-                prompt: ciRemediationPrompt,
-                sourceRepo: session.sourceRepo,
-                startingBranch: session.baseBranch ?? branchName ?? session.branchName,
-                auditorContext: `ci-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};checkRun:${check_run.id}`,
-              });
-
-              // Persist the externalSessionId so syncSessionStatus can poll Jules for updates.
-              await db
-                .update(sessions)
-                .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
-                .where(eq(sessions.id, newSessionId));
-
-              console.log(`🚀 Nexus: Jules CI remediation agent dispatched. External session: ${julesSession.id}`);
-            } catch (dispatchErr) {
-              const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-              console.error(`❌ Nexus: Failed to dispatch Jules CI remediation agent:`, dispatchErr);
-              await db
-                .update(sessions)
-                .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
-                .where(eq(sessions.id, newSessionId));
+            if (!response.ok) {
+              const body = await response.text();
+              throw new Error(`Failed to trigger auto-remediation: ${response.status} ${body}`);
             }
+
+            // Keep the lastError updated for UI visibility
+            await db.update(sessions)
+              .set({ lastError: String(errorLogs).substring(0, 500) })
+              .where(eq(sessions.id, session.id));
+
           } catch (err: unknown) {
             console.error("Error processing CI failure:", err);
             const errorMessage = err instanceof Error ? err.message : String(err);

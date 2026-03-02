@@ -7,6 +7,7 @@ import { sessions, fileLocks, goals, cascades } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import {
   analyzeCascade,
+  autoRemediate,
 } from "@/lib/auditor/cascade-engine";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
@@ -46,7 +47,25 @@ export async function POST(req: Request) {
     );
   }
 
+
+  if (parsed.data.type === 'remediation') {
+    try {
+      const result = await autoRemediate(parsed.data.sessionId, parsed.data.logs);
+      return Response.json(result);
+    } catch (error) {
+      console.error("❌ Nexus: Auto-remediation failed:", error);
+      return Response.json(
+        {
+          error: "Auto-remediation failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        },
+        { status: 500 }
+      );
+    }
+  }
+
   const { sourceRepo, branch, commitSha, fileChanges, goalId, autoDispatch } = parsed.data;
+
 
   // Generate cascade ID
   const cascadeId = `cascade_${commitSha.slice(0, 8)}_${Date.now()}`;

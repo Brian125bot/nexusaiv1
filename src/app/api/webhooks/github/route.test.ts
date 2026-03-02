@@ -162,7 +162,9 @@ describe("POST /api/webhooks/github", () => {
     const { sessions } = await import("@/db/schema");
 
     // Seed mock data
-    await db.insert(sessions).values({
+    const { eq } = await import('drizzle-orm');
+    await db.delete(sessions).where(eq(sessions.id, 'session_already_completed'));
+            await db.insert(sessions).values({
       id: "session_already_completed",
       sourceRepo: "acme/repo",
       branchName: "main",
