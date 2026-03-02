@@ -23,6 +23,7 @@ const checkRunEventSchema = z.object({
   check_run: z.object({
     id: z.number().int().positive(),
     head_sha: z.string(),
+    name: z.string(),
     status: z.string(),
     conclusion: z.string().nullable(),
     output: z
@@ -234,124 +235,155 @@ export async function POST(req: Request) {
         return Response.json({ ignored: true, reason: "check_run not completed" }, { status: 202 });
       }
 
-      const branchName = check_run.pull_requests?.[0]?.head.ref;
-      if (!branchName) {
-        return Response.json({ ignored: true, reason: "No pull request associated with check_run" }, { status: 202 });
-      }
+      const headSha = check_run.head_sha;
 
-      const session = await db.query.sessions.findFirst({
-        where: eq(sessions.branchName, branchName),
+      let session = await db.query.sessions.findFirst({
+        where: eq(sessions.lastReviewedCommit, headSha),
       });
 
-      if (!session || session.status === "completed") {
-        return Response.json({ ignored: true, reason: "No active session found for branch" }, { status: 202 });
+      // fallback: try to find by branch if lastReviewedCommit doesn't match and pull request exists
+      const branchName = check_run.pull_requests?.[0]?.head.ref;
+      if (!session && branchName) {
+        session = await db.query.sessions.findFirst({
+          where: eq(sessions.branchName, branchName),
+        });
       }
 
-      if (check_run.conclusion === "failure") {
-        // CI failed, fetch raw logs from GitHub Actions if possible
-        const rawLogs = await githubClient.getCheckRunLogs(
-          repository.owner.login,
-          repository.name,
-          check_run.id
-        );
+      if (!session) {
+         return Response.json({ ignored: true, reason: "No active session found for commit" }, { status: 202 });
+      }
 
-        const errorLogs = rawLogs || check_run.output?.text || check_run.output?.summary || "CI Build Failed";
+      if (["verifying", "completed", "failed"].includes(session.status)) {
+        console.log(`[Webhook] Ignoring check_run: Session ${session.id} already in state ${session.status}`);
+        return Response.json({ ignored: true, reason: `Session ${session.id} already in state ${session.status}` }, { status: 200 });
+      }
 
-        await db
-          .update(sessions)
-          .set({
-            status: "failed",
-            lastError: String(errorLogs).substring(0, 5000), // Ensure we capture more context if available
-          })
-          .where(eq(sessions.id, session.id));
+      if (check_run.conclusion === "failure" || check_run.conclusion === "timed_out") {
+        after(async () => {
+          try {
+            // CI failed, fetch raw logs from GitHub Actions if possible
+            const rawLogs = await githubClient.getCheckRunLogs(
+              repository.owner.login,
+              repository.name,
+              check_run.id
+            );
 
-        if (session.remediationDepth >= 3) {
-          console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id} after CI failure.`);
-          if (session.goalId) {
-            await db.update(goals)
-              .set({ status: "drifted" })
-              .where(eq(goals.id, session.goalId));
+            const errorLogs = rawLogs || check_run.output?.text || check_run.output?.summary || "CI Build Failed";
+
+            // Mark session failed immediately
+            await db
+              .update(sessions)
+              .set({
+                status: "failed",
+                lastError: String(errorLogs).substring(0, 5000), // Ensure we capture more context if available
+              })
+              .where(eq(sessions.id, session.id));
+
+            if (session.remediationDepth >= 3) {
+              console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id} after CI failure.`);
+              if (session.goalId) {
+                await db.update(goals)
+                  .set({ status: "drifted" })
+                  .where(eq(goals.id, session.goalId));
+              }
+              return; // Stop early
+            }
+
+            const newSessionId = `remediate-${crypto.randomUUID()}`;
+
+            // Build a CI-context-aware prompt so the repair agent knows exactly what broke.
+            const ciRemediationPrompt = [
+              `## Nexus CI Failure Remediation`,
+              ``,
+              `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
+              `**Parent Session:** ${session.id}`,
+              `**Repository:** ${session.sourceRepo}`,
+              `**Branch:** ${branchName || session.branchName}`,
+              `**Failed Check Run ID:** ${check_run.id}`,
+              `**Commit SHA:** ${check_run.head_sha}`,
+              ``,
+              `### CI Failure Logs`,
+              "```",
+              String(errorLogs).substring(0, 8000),
+              "```",
+              ``,
+              `### Your Task`,
+              `Analyse the CI failure logs provided above and fix the root cause.`,
+              ``,
+              `### Constraints`,
+              `- Work on the existing branch: \`${branchName || session.branchName}\``,
+              `- Only modify files required to fix the CI failure`,
+              `- Do NOT introduce new dependencies unless absolutely required`,
+              `- Ensure TypeScript compiles cleanly after your changes`,
+              `- Commit with message: \`fix: ci remediation [Nexus-Auto]\``,
+            ].join("\n");
+
+            await db.transaction(async (tx) => {
+              await tx.insert(sessions).values({
+                id: newSessionId,
+                goalId: session.goalId,
+                sourceRepo: session.sourceRepo,
+                branchName: branchName || session.branchName,
+                baseBranch: session.baseBranch,
+                status: "queued",
+                remediationDepth: session.remediationDepth + 1,
+              });
+
+              await LockManager.transferLocks(session.id, newSessionId, tx);
+            });
+
+            // DISPATCH: Eagerly kick off the Jules agent so the session doesn't hang forever in queued.
+            try {
+              const julesSession = await julesClient.createSession({
+                prompt: ciRemediationPrompt,
+                sourceRepo: session.sourceRepo,
+                startingBranch: session.baseBranch ?? branchName ?? session.branchName,
+                auditorContext: `ci-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};checkRun:${check_run.id}`,
+              });
+
+              // Persist the externalSessionId so syncSessionStatus can poll Jules for updates.
+              await db
+                .update(sessions)
+                .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
+                .where(eq(sessions.id, newSessionId));
+
+              console.log(`🚀 Nexus: Jules CI remediation agent dispatched. External session: ${julesSession.id}`);
+            } catch (dispatchErr) {
+              const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+              console.error(`❌ Nexus: Failed to dispatch Jules CI remediation agent:`, dispatchErr);
+              await db
+                .update(sessions)
+                .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
+                .where(eq(sessions.id, newSessionId));
+            }
+          } catch (err: unknown) {
+            console.error("Error processing CI failure:", err);
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            await db.update(sessions)
+              .set({ status: "failed", lastError: errorMessage.substring(0, 5000) })
+              .where(eq(sessions.id, session.id));
           }
-          return Response.json({ received: true, eventType, result: "ci_failed_max_remediation_depth_reached" });
-        }
-
-        const newSessionId = `remediate-${crypto.randomUUID()}`;
-
-        // Build a CI-context-aware prompt so the repair agent knows exactly what broke.
-        const ciRemediationPrompt = [
-          `## Nexus CI Failure Remediation`,
-          ``,
-          `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
-          `**Parent Session:** ${session.id}`,
-          `**Repository:** ${session.sourceRepo}`,
-          `**Branch:** ${branchName}`,
-          `**Failed Check Run ID:** ${check_run.id}`,
-          `**Commit SHA:** ${check_run.head_sha}`,
-          ``,
-          `### CI Failure Logs`,
-          "```",
-          String(errorLogs).substring(0, 8000),
-          "```",
-          ``,
-          `### Your Task`,
-          `Analyse the CI failure logs provided above and fix the root cause.`,
-          ``,
-          `### Constraints`,
-          `- Work on the existing branch: \`${branchName}\``,
-          `- Only modify files required to fix the CI failure`,
-          `- Do NOT introduce new dependencies unless absolutely required`,
-          `- Ensure TypeScript compiles cleanly after your changes`,
-          `- Commit with message: \`fix: ci remediation [Nexus-Auto]\``,
-        ].join("\n");
-
-        await db.transaction(async (tx) => {
-          await tx.insert(sessions).values({
-            id: newSessionId,
-            goalId: session.goalId,
-            sourceRepo: session.sourceRepo,
-            branchName: session.branchName,
-            baseBranch: session.baseBranch,
-            status: "queued",
-            remediationDepth: session.remediationDepth + 1,
-          });
-
-          await LockManager.transferLocks(session.id, newSessionId, tx);
         });
 
-        // DISPATCH: Eagerly kick off the Jules agent so the session doesn't hang forever in queued.
-        try {
-          const julesSession = await julesClient.createSession({
-            prompt: ciRemediationPrompt,
-            sourceRepo: session.sourceRepo,
-            startingBranch: session.baseBranch ?? branchName,
-            auditorContext: `ci-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};checkRun:${check_run.id}`,
-          });
-
-          // Persist the externalSessionId so syncSessionStatus can poll Jules for updates.
-          await db
-            .update(sessions)
-            .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
-            .where(eq(sessions.id, newSessionId));
-
-          console.log(`🚀 Nexus: Jules CI remediation agent dispatched. External session: ${julesSession.id}`);
-        } catch (dispatchErr) {
-          const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-          console.error(`❌ Nexus: Failed to dispatch Jules CI remediation agent:`, dispatchErr);
-          await db
-            .update(sessions)
-            .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
-            .where(eq(sessions.id, newSessionId));
-        }
-
-        return Response.json({ received: true, eventType, result: "ci_failed_remediation_triggered", newSessionId });
+        return Response.json({ received: true, eventType, result: "ci_failed_remediation_triggered" });
       }
 
       if (check_run.conclusion === "success") {
+        const primaryPipelines = ["Vercel", "build", "test", "ci"];
+        const isPrimary = primaryPipelines.some(p => check_run.name.toLowerCase().includes(p.toLowerCase()));
+
+        if (!isPrimary) {
+           console.log(`[Webhook] Ignored non-primary check_run success: ${check_run.name}`);
+           return Response.json({ ignored: true, reason: `check_run success ignored for non-primary pipeline: ${check_run.name}` }, { status: 200 });
+        }
+
         // CI succeeded, trigger semantic auditor
         await db
           .update(sessions)
           .set({ status: "verifying" })
           .where(eq(sessions.id, session.id));
+
+        console.log(`[Webhook] CI Signal Received: ${headSha} -> success. Updating Session ${session.id} to verifying.`);
 
         after(async () => {
           try {
@@ -359,8 +391,8 @@ export async function POST(req: Request) {
               eventType: "push", // Treat as push to review latest sha
               owner: repository.owner.login,
               repo: repository.name,
-              branch: branchName,
-              sha: check_run.head_sha,
+              branch: branchName || session.branchName,
+              sha: headSha,
             });
           } catch (err: unknown) {
             console.error("Auditor error:", err);
