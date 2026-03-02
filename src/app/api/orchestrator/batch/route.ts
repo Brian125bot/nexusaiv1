@@ -9,6 +9,7 @@ import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
+import { buildEnrichedPrompt } from "@/lib/jules/prompt-builder";
 import { batchDispatchSchema, batchDispatchResponseSchema } from "@/lib/cascade/schemas";
 
 export const runtime = "nodejs";
@@ -128,8 +129,9 @@ export async function POST(req: Request) {
           };
         }
 
+        const enrichedPrompt = await buildEnrichedPrompt(sessionPrompt, cascadeGoalId, job.files);
         const session = await julesClient.createSession({
-          prompt: sessionPrompt,
+          prompt: enrichedPrompt,
           sourceRepo,
           startingBranch: baseBranch,
           auditorContext: `cascade:${cascadeId};batch:${batchId};job:${job.id};files:${job.files.join(",")}`,

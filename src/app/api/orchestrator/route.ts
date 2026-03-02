@@ -10,6 +10,7 @@ import { fileLocks, sessions } from "@/db/schema";
 import { authErrorResponse, validateUser } from "@/lib/auth/session";
 import { aiEnv } from "@/lib/config";
 import { julesClient } from "@/lib/jules/client";
+import { buildEnrichedPrompt } from "@/lib/jules/prompt-builder";
 import { orchestratorRatelimit, rateLimitExceededResponse } from "@/lib/rate-limit";
 
 const google = createGoogleGenerativeAI({
@@ -225,9 +226,11 @@ export async function POST(req: Request) {
               return conflictResult;
             }
 
+            const enrichedPrompt = await buildEnrichedPrompt(toolPrompt, goalId, uniqueImpactFiles);
+
             try {
               const julesSession = await julesClient.createSession({
-                prompt: toolPrompt,
+                prompt: enrichedPrompt,
                 sourceRepo: toolSourceRepo,
                 startingBranch: toolStartingBranch,
                 auditorContext: `goalId=${goalId}; internalSessionId=${internalSessionId}; impactFiles=${uniqueImpactFiles.join(",")}`,

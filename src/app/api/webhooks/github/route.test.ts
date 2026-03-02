@@ -216,7 +216,7 @@ describe("POST /api/webhooks/github", () => {
       lastReviewedCommit: "sha-success",
       createdAt: new Date(),
       isCascadeRoot: false,
-    });
+    }).onConflictDoNothing();
 
     const req = new Request("http://localhost/api/webhooks/github", {
       method: "POST",
@@ -265,7 +265,7 @@ describe("POST /api/webhooks/github", () => {
       lastReviewedCommit: "sha-fail",
       createdAt: new Date(),
       isCascadeRoot: false,
-    });
+    }).onConflictDoNothing();
 
     // Mock after to execute immediately
     vi.mock("next/server", () => ({
