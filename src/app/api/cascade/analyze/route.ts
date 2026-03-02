@@ -1,3 +1,4 @@
+import { isCoreFile } from "@/lib/cascade-config";
 import { randomUUID } from "crypto";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
@@ -12,6 +13,8 @@ import {
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { cascadeRequestSchema, cascadeResponseSchema } from "@/lib/cascade/schemas";
+import { findDownstreamDependents } from "@/lib/ast/dependency-graph";
+import { Project } from "ts-morph";
 
 export const runtime = "nodejs";
 
@@ -72,9 +75,44 @@ export async function POST(req: Request) {
   const dispatchStartedAt = Date.now();
 
   try {
-    // Step 1: Analyze the blast radius
+    // Step 1: Analyze the blast radius with deterministic AST engine
     console.log(`🔍 Nexus: Analyzing cascade for ${cascadeId}`);
-    const analysis = await analyzeCascade(fileChanges);
+
+    // Initialize ts-morph
+    const project = new Project({
+      tsConfigFilePath: "tsconfig.json",
+    });
+
+    // Get all loaded source file paths
+    const sourceFiles = project.getSourceFiles().map(f => f.getFilePath());
+
+    // Request shared locks for the source files before AST parsing
+    const lockIntents = sourceFiles.map(filePath => ({ filePath, type: "shared" as const }));
+    const astLockSessionId = `ast_${cascadeId}`;
+    const lockResult = await LockManager.acquireLocks(astLockSessionId, lockIntents);
+
+    let astDownstreamFiles: string[] = [];
+    let isAstVerified = false;
+
+    if (lockResult.ok) {
+      try {
+        const modifiedCoreFiles = fileChanges.filter(c => isCoreFile(c.filePath)).map(c => c.filePath);
+        if (modifiedCoreFiles.length > 0) {
+          astDownstreamFiles = await findDownstreamDependents(modifiedCoreFiles);
+          isAstVerified = true;
+          console.log(`🌳 Nexus: AST Engine found ${astDownstreamFiles.length} mathematically verified downstream files.`);
+        }
+      } catch (error) {
+        console.error(`❌ Nexus: AST Engine failed:`, error);
+        // Fallback to empty downstream files, isAstVerified remains false
+      } finally {
+        await LockManager.releaseLocks(astLockSessionId);
+      }
+    } else {
+      console.warn(`⚠️ Nexus: Failed to acquire shared locks for AST parsing. Falling back to probabilistic cascade.`);
+    }
+
+    const analysis = await analyzeCascade(fileChanges, astDownstreamFiles);
 
     if (!analysis.isCascade) {
       return Response.json({
@@ -100,6 +138,7 @@ export async function POST(req: Request) {
       repairJobCount: analysis.repairJobs.length,
       summary: analysis.summary,
       status: "analyzing",
+      isAstVerified,
     }).onConflictDoNothing();
 
     // Step 2: Optionally dispatch repair sessions

@@ -31,6 +31,7 @@ export async function GET(req: Request) {
       downstreamFiles: cascade.downstreamFiles,
       repairJobCount: cascade.repairJobCount,
       status: cascade.status,
+      isAstVerified: cascade.isAstVerified,
       createdAt: cascade.createdAt.getTime(),
     }));
 

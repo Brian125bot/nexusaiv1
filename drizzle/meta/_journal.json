@@ -36,6 +36,13 @@
       "when": 1772330625078,
       "tag": "0004_normalize_acceptance_criteria",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1772492068939,
+      "tag": "0005_soft_iron_monger",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@ import { swrKeys } from "@/lib/ui/swr-keys";
 type CascadeEvent = {
   cascadeId: string;
   isCascade: boolean;
+  isAstVerified: boolean;
   coreFilesChanged: string[];
   downstreamFiles: string[];
   repairJobCount: number;
@@ -86,6 +87,11 @@ function CascadeEventCard({ cascade }: { cascade: CascadeEvent }) {
             >
               {statusLabels[cascade.status]}
             </span>
+            {cascade.isAstVerified && (
+              <span className="rounded-full px-2 py-0.5 text-xs font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30 ml-2">
+                AST Verified
+              </span>
+            )}
           </div>
 
           {cascade.coreFilesChanged.length > 0 && (

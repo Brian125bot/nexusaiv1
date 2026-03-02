@@ -27,6 +27,7 @@ export const goals = pgTable("goals", {
 });
 
 export const cascades = pgTable("cascades", {
+  isAstVerified: boolean("is_ast_verified").default(false).notNull(),
   id: text("id").primaryKey(),
   triggerSessionId: text("trigger_session_id"), // Not a strict FK to avoid circular dependencies with sessions
   coreFilesChanged: jsonb("core_files_changed").$type<string[]>().default([]).notNull(),

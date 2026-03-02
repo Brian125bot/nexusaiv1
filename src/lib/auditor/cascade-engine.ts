@@ -50,7 +50,7 @@ export type CascadeAnalysisResult = {
 const cascadeAnalysisSchema = z.object({
   isCascade: z.boolean(),
   coreFilesChanged: z.array(z.string().min(1)),
-  downstreamFiles: z.array(z.string().min(1)),
+
   repairJobs: z.array(
     z.object({
       id: z.string().min(1),
@@ -70,6 +70,7 @@ const cascadeAnalysisSchema = z.object({
 function buildCascadePrompt(
   coreFileChanges: FileChange[],
   allChangedFiles: string[],
+  downstreamFiles: string[] = [],
 ): string {
   const sections: string[] = [
     "You are the Nexus Lead Architect. A core system file has been modified.",
@@ -90,10 +91,16 @@ function buildCascadePrompt(
   sections.push("### All Changed Files in Commit");
   sections.push(allChangedFiles.map(f => `- ${f}`).join("\n"));
 
+  if (downstreamFiles.length > 0) {
+    sections.push("");
+    sections.push("### Downstream Dependents (Mathematically Verified)");
+    sections.push("Here are the EXACT files that are broken due to the core changes:");
+    sections.push(downstreamFiles.map(f => `- ${f}`).join("\n"));
+  }
+
   sections.push("");
   sections.push("### Instructions");
-  sections.push("1. Identify which files in 'All Changed Files' import or depend on the core files");
-  sections.push("2. Group these downstream files into logical 'Repair Jobs'");
+  sections.push("1. Group the modified and downstream files into logical 'Repair Jobs'");
   sections.push("3. Each Repair Job should be handleable by a separate AI agent");
   sections.push("4. Ensure NO file appears in multiple repair jobs");
   sections.push("5. For each job, provide a clear prompt describing what needs to be fixed");
@@ -101,7 +108,7 @@ function buildCascadePrompt(
   sections.push("### Output Requirements");
   sections.push("- isCascade: true if this change impacts multiple downstream files");
   sections.push("- coreFilesChanged: list of core files that were modified");
-  sections.push("- downstreamFiles: all files that need updates due to this change");
+
   sections.push("- repairJobs: array of discrete repair tasks (3-5 jobs ideal)");
   sections.push("- summary: brief explanation of the architectural change");
   sections.push("- confidence: your confidence in this analysis (0-1)");
@@ -114,6 +121,7 @@ function buildCascadePrompt(
  */
 export async function analyzeCascade(
   allChangedFiles: FileChange[],
+  astDownstreamFiles: string[] = [],
 ): Promise<CascadeAnalysisResult> {
   // Identify which changed files are core files
   const coreFileChanges = allChangedFiles.filter(change =>
@@ -139,7 +147,7 @@ export async function analyzeCascade(
       schema: cascadeAnalysisSchema,
       system:
         "You are the Nexus Lead Architect AI. Analyze code changes for blast radius impact. Be conservative - only flag true cascade scenarios.",
-      prompt: buildCascadePrompt(coreFileChanges, allFilePaths),
+      prompt: buildCascadePrompt(coreFileChanges, allFilePaths, astDownstreamFiles),
       providerOptions: {
         google: {
           thinkingConfig: {
@@ -156,6 +164,7 @@ export async function analyzeCascade(
 
     return {
       ...analysis,
+      downstreamFiles: astDownstreamFiles,
       repairJobs: qualifiedJobs,
     };
   } catch (error) {

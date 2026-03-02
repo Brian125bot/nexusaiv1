@@ -37,10 +37,23 @@ vi.mock("@/lib/auditor/cascade-engine", () => ({
   analyzeCascade: (...args: unknown[]) => analyzeCascadeMock(...args),
 }));
 
+vi.mock("@/lib/ast/dependency-graph", () => ({
+  findDownstreamDependents: vi.fn().mockResolvedValue(["src/lib/a.ts"]),
+}));
+
 vi.mock("@/lib/registry/lock-manager", () => ({
   LockManager: {
     acquireLocks: (...args: unknown[]) => acquireLocksMock(...args),
+    releaseLocks: vi.fn().mockResolvedValue(undefined),
   },
+}));
+
+vi.mock("ts-morph", () => ({
+  Project: class {
+    getSourceFiles() {
+      return [{ getFilePath: () => "src/lib/a.ts" }];
+    }
+  }
 }));
 
 vi.mock("@/lib/jules/client", () => ({
