@@ -15,6 +15,7 @@
     "@descope/nextjs-sdk": "^0.15.14",
     "@neondatabase/serverless": "^1.0.2",
     "@octokit/rest": "^22.0.1",
+    "@radix-ui/react-hover-card": "^1.1.15",
     "@upstash/ratelimit": "^2.0.8",
     "@vercel/kv": "^3.0.0",
     "ai": "^6.0.101",

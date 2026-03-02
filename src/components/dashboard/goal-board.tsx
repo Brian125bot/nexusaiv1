@@ -1,11 +1,12 @@
 "use client";
 
+import * as HoverCard from "@radix-ui/react-hover-card";
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 
 import { fetcher, jsonRequest } from "@/lib/ui/fetcher";
 import { swrKeys } from "@/lib/ui/swr-keys";
-import type { Goal, GoalStatus } from "@/lib/ui/types";
+import type { Goal, GoalStatus, Session } from "@/lib/ui/types";
 
 const statusOrder: GoalStatus[] = ["backlog", "in-progress", "completed", "drifted"];
 
@@ -29,6 +30,9 @@ export function GoalBoard() {
   const { data, mutate, isLoading } = useSWR<{ goals: Goal[] }>(swrKeys.goals, fetcher, {
     refreshInterval: 15000,
   });
+  const { data: sessionsData } = useSWR<{ sessions: Session[] }>(swrKeys.activeSessions, fetcher, {
+    refreshInterval: 15000,
+  });
   const [draft, setDraft] = useState(emptyGoalDraft());
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +44,16 @@ export function GoalBoard() {
       goals: goals.filter((goal) => goal.status === status),
     }));
   }, [data?.goals]);
+
+  const verifyingGoalIds = useMemo(
+    () =>
+      new Set(
+        (sessionsData?.sessions ?? []).flatMap((session) =>
+          session.status === "verifying" && session.goalId ? [session.goalId] : [],
+        ),
+      ),
+    [sessionsData?.sessions],
+  );
 
   const handleCreate = async () => {
     setError(null);
@@ -165,27 +179,69 @@ export function GoalBoard() {
             </h3>
             <p className="mt-1 text-xs text-slate-400">{bucket.goals.length} goals</p>
             <div className="mt-3 space-y-3">
-              {bucket.goals.map((goal) => (
-                <article key={goal.id} className="rounded-lg border border-slate-700 bg-slate-950/80 p-3">
-                  <h4 className="text-sm font-semibold text-slate-100">{goal.title}</h4>
+              {bucket.goals.map((goal) => {
+                const isVerifying = verifyingGoalIds.has(goal.id);
+
+                return (
+                  <article
+                    key={goal.id}
+                    className={`rounded-lg border bg-slate-950/80 p-3 ${
+                      isVerifying
+                        ? "animate-pulse border-amber-500/50 ring-1 ring-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+                        : "border-slate-700"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-sm font-semibold text-slate-100">{goal.title}</h4>
+                      {isVerifying ? (
+                        <span className="rounded-md border border-amber-500/40 bg-amber-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                          Verifying...
+                        </span>
+                      ) : null}
+                    </div>
                   {goal.description ? (
                     <p className="mt-1 text-xs text-slate-400">{goal.description}</p>
                   ) : null}
                   <ul className="mt-2 space-y-2 text-xs text-slate-300">
                     {goal.acceptanceCriteria.map((criterion) => (
                       <li key={criterion.id} className="flex flex-col gap-1">
-                        <div className="flex items-start gap-1.5" title={criterion.reasoning}>
-                          <span>{criterion.met ? "✅" : "⏳"}</span>
-                          <span className={criterion.met ? "text-slate-300" : "text-slate-400 italic"}>
-                            {criterion.text}
-                          </span>
-                        </div>
+                        <HoverCard.Root openDelay={120} closeDelay={120}>
+                          <HoverCard.Trigger asChild>
+                            <button type="button" className="flex items-start gap-1.5 text-left">
+                              <span>{criterion.met ? "✅" : "⏳"}</span>
+                              <span className={criterion.met ? "text-slate-300" : "text-slate-400 italic"}>
+                                {criterion.text}
+                              </span>
+                            </button>
+                          </HoverCard.Trigger>
+                          <HoverCard.Portal>
+                            <HoverCard.Content
+                              side="top"
+                              align="start"
+                              sideOffset={8}
+                              collisionPadding={16}
+                              className="z-50 w-72 max-w-[calc(100vw-2rem)] break-words rounded-lg border border-slate-700 bg-slate-900/95 p-3 text-xs text-slate-300 shadow-xl backdrop-blur-sm"
+                            >
+                              <p className="font-semibold text-slate-200">Auditor Reasoning</p>
+                              <p className="mt-1 leading-relaxed text-slate-300">
+                                {criterion.reasoning?.trim()
+                                  ? criterion.reasoning
+                                  : "No auditor reasoning captured."}
+                              </p>
+                              <HoverCard.Arrow className="fill-slate-700" />
+                            </HoverCard.Content>
+                          </HoverCard.Portal>
+                        </HoverCard.Root>
                         {criterion.files && criterion.files.length > 0 && (
                           <div className="ml-5 flex flex-wrap gap-1">
                             {criterion.files.map((file) => (
                               <span
                                 key={file}
-                                className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 border border-slate-700"
+                                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                                  criterion.met
+                                    ? "border-emerald-700/50 bg-emerald-950/30 text-emerald-300"
+                                    : "border-slate-700 bg-slate-800 text-slate-400"
+                                }`}
                                 title={file}
                               >
                                 {file.split("/").pop()}
@@ -241,8 +297,9 @@ export function GoalBoard() {
                       </button>
                     )}
                   </div>
-                </article>
-              ))}
+                  </article>
+                );
+              })}
               {bucket.goals.length === 0 ? (
                 <p className="rounded-md border border-dashed border-slate-700 p-3 text-xs text-slate-500">
                   No goals in this column.
