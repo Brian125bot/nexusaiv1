@@ -10,6 +10,7 @@ import { CORE_FILES, isCoreFile } from "@/lib/cascade-config";
 import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { githubClient } from "@/lib/github/octokit";
+import { julesClient } from "@/lib/jules/client";
 
 export const runtime = "nodejs";
 
@@ -255,7 +256,7 @@ export async function POST(req: Request) {
         );
 
         const errorLogs = rawLogs || check_run.output?.text || check_run.output?.summary || "CI Build Failed";
-        
+
         await db
           .update(sessions)
           .set({
@@ -274,19 +275,73 @@ export async function POST(req: Request) {
           return Response.json({ received: true, eventType, result: "ci_failed_max_remediation_depth_reached" });
         }
 
-        // Self-Healing Trigger
         const newSessionId = `remediate-${crypto.randomUUID()}`;
-        await db.insert(sessions).values({
-          id: newSessionId,
-          goalId: session.goalId,
-          sourceRepo: session.sourceRepo,
-          branchName: session.branchName,
-          baseBranch: session.baseBranch,
-          status: "queued",
-          remediationDepth: session.remediationDepth + 1,
+
+        // Build a CI-context-aware prompt so the repair agent knows exactly what broke.
+        const ciRemediationPrompt = [
+          `## Nexus CI Failure Remediation`,
+          ``,
+          `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
+          `**Parent Session:** ${session.id}`,
+          `**Repository:** ${session.sourceRepo}`,
+          `**Branch:** ${branchName}`,
+          `**Failed Check Run ID:** ${check_run.id}`,
+          `**Commit SHA:** ${check_run.head_sha}`,
+          ``,
+          `### CI Failure Logs`,
+          "```",
+          String(errorLogs).substring(0, 8000),
+          "```",
+          ``,
+          `### Your Task`,
+          `Analyse the CI failure logs provided above and fix the root cause.`,
+          ``,
+          `### Constraints`,
+          `- Work on the existing branch: \`${branchName}\``,
+          `- Only modify files required to fix the CI failure`,
+          `- Do NOT introduce new dependencies unless absolutely required`,
+          `- Ensure TypeScript compiles cleanly after your changes`,
+          `- Commit with message: \`fix: ci remediation [Nexus-Auto]\``,
+        ].join("\n");
+
+        await db.transaction(async (tx) => {
+          await tx.insert(sessions).values({
+            id: newSessionId,
+            goalId: session.goalId,
+            sourceRepo: session.sourceRepo,
+            branchName: session.branchName,
+            baseBranch: session.baseBranch,
+            status: "queued",
+            remediationDepth: session.remediationDepth + 1,
+          });
+
+          await LockManager.transferLocks(session.id, newSessionId, tx);
         });
 
-        await LockManager.transferLocks(session.id, newSessionId);
+        // DISPATCH: Eagerly kick off the Jules agent so the session doesn't hang forever in queued.
+        try {
+          const julesSession = await julesClient.createSession({
+            prompt: ciRemediationPrompt,
+            sourceRepo: session.sourceRepo,
+            startingBranch: session.baseBranch ?? branchName,
+            auditorContext: `ci-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};checkRun:${check_run.id}`,
+          });
+
+          // Persist the externalSessionId so syncSessionStatus can poll Jules for updates.
+          await db
+            .update(sessions)
+            .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
+            .where(eq(sessions.id, newSessionId));
+
+          console.log(`🚀 Nexus: Jules CI remediation agent dispatched. External session: ${julesSession.id}`);
+        } catch (dispatchErr) {
+          const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+          console.error(`❌ Nexus: Failed to dispatch Jules CI remediation agent:`, dispatchErr);
+          await db
+            .update(sessions)
+            .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
+            .where(eq(sessions.id, newSessionId));
+        }
 
         return Response.json({ received: true, eventType, result: "ci_failed_remediation_triggered", newSessionId });
       }
@@ -307,8 +362,13 @@ export async function POST(req: Request) {
               branch: branchName,
               sha: check_run.head_sha,
             });
-          } catch (err) {
+          } catch (err: unknown) {
             console.error("Auditor error:", err);
+            // CRITICAL: Prevent silent failure state
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            await db.update(sessions)
+              .set({ status: "failed", lastError: errorMessage.substring(0, 5000) })
+              .where(eq(sessions.id, session.id));
           }
         });
 
@@ -334,12 +394,12 @@ export async function POST(req: Request) {
 
         if (session && session.status !== "completed" && session.status !== "failed") {
           const newStatus = pr.merged ? "completed" : "failed";
-          
+
           console.log(`🧹 Nexus: PR closed (${pr.merged ? 'merged' : 'unmerged'}). Transitioning session ${session.id} to ${newStatus} and releasing locks.`);
-          
+
           await db
             .update(sessions)
-            .set({ 
+            .set({
               status: newStatus,
               lastSyncedAt: new Date()
             })
@@ -347,10 +407,10 @@ export async function POST(req: Request) {
 
           // Physically delete entries from the file_locks table
           await LockManager.releaseLocks(session.id);
-          
+
           return Response.json({ received: true, eventType, result: "session_cleaned_up", sessionId: session.id, newStatus });
         }
-        
+
         return Response.json({ ignored: true, reason: "No active session found for closed PR or already terminal" }, { status: 202 });
       }
 
@@ -405,12 +465,12 @@ export async function POST(req: Request) {
 
       let cascadeTrigger:
         | {
-            triggered: boolean;
-            coreFilesChanged: string[];
-            requestStatus?: number;
-            requestAccepted?: boolean;
-            requestBody?: unknown;
-          }
+          triggered: boolean;
+          coreFilesChanged: string[];
+          requestStatus?: number;
+          requestAccepted?: boolean;
+          requestBody?: unknown;
+        }
         | undefined;
 
       if (coreFilesChanged.length > 0 && fileChanges.length > 0) {

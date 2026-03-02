@@ -24,7 +24,7 @@ export async function POST(req: Request, context: RouteContext) {
 
   try {
     // Update session status to 'failed' with termination message
-    const [updated] = await db
+    await db
       .update(sessions)
       .set({ 
         status: "failed", 

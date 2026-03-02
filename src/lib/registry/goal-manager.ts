@@ -34,22 +34,24 @@ export class GoalManager {
    * Updates the status of a specific acceptance criterion.
    */
   static async updateGoalProgress(goalId: string, criteriaIndex: number, isMet: boolean) {
-    const goal = await db.query.goals.findFirst({
-      where: eq(goals.id, goalId),
+    await db.transaction(async (tx) => {
+      // Use SELECT ... FOR UPDATE to acquire a row-level lock and prevent concurrent read-modify-write lost updates
+      const result = await tx.select().from(goals).where(eq(goals.id, goalId)).for("update");
+      const goal = result[0];
+
+      if (!goal) throw new Error("Goal not found");
+      
+      const criteria = (goal.acceptanceCriteria as AcceptanceCriterion[]) || [];
+      const item = criteria[criteriaIndex];
+
+      if (item !== undefined) {
+         item.met = isMet;
+      }
+
+      await tx.update(goals)
+        .set({ acceptanceCriteria: criteria })
+        .where(eq(goals.id, goalId));
     });
-
-    if (!goal) throw new Error("Goal not found");
-    
-    const criteria = (goal.acceptanceCriteria as AcceptanceCriterion[]) || [];
-    const item = criteria[criteriaIndex];
-
-    if (item !== undefined) {
-       item.met = isMet;
-    }
-
-    await db.update(goals)
-      .set({ acceptanceCriteria: criteria })
-      .where(eq(goals.id, goalId));
   }
 
   static async getGoal(goalId: string) {
