@@ -271,18 +271,21 @@ export async function autoRemediate(sessionId: string, logs: string) {
   let prDiff = "";
   try {
     // Try to find if this branch has an open PR. If so, get PR diff.
-    // PR matching logic fallback // In case branch name explicitly tracks PR
-
-    // We can also just search repo pulls if needed, but for simplicity, let's try getting commit diff
-    // against the base branch as the fallback.
-    // In a real app we might query GitHub for open PRs by branch name.
-
-    // Let's get the diff from base branch to current branch
-    prDiff = await githubClient.getDiff(
-      session.sourceRepo.split('/')[0],
-      session.sourceRepo.split('/')[1],
-      { type: 'commit', base: session.baseBranch, head: session.branchName }
-    );
+    const sessionWithPr = session as unknown as { prNumber?: number };
+    if (sessionWithPr.prNumber) {
+      prDiff = await githubClient.getDiff(
+        session.sourceRepo.split('/')[0],
+        session.sourceRepo.split('/')[1],
+        { type: 'pr', pullNumber: sessionWithPr.prNumber }
+      );
+    } else {
+      // Let's get the diff from base branch to current branch
+      prDiff = await githubClient.getDiff(
+        session.sourceRepo.split('/')[0],
+        session.sourceRepo.split('/')[1],
+        { type: 'commit', base: session.baseBranch, head: session.branchName }
+      );
+    }
   } catch (error) {
     console.warn(`[Ouroboros] Failed to get diff for ${session.sourceRepo} ${session.branchName}, falling back to empty diff`, error);
   }
@@ -326,6 +329,19 @@ export async function autoRemediate(sessionId: string, logs: string) {
 
   // Execute an atomic handoff of context and locks
   await db.transaction(async (tx) => {
+    let calculatedCascadeId = session.cascadeId;
+
+    if (!calculatedCascadeId) {
+      // Insert a record into the cascades table linking the failed parentSessionId to the new childSessionId.
+      calculatedCascadeId = `cascade_remediate_${sessionId}_${Date.now()}`;
+      await tx.insert(cascades).values({
+        id: calculatedCascadeId,
+        triggerSessionId: sessionId,
+        summary: `Auto-remediation cascade for session ${sessionId}`,
+        status: "analyzing",
+      }).onConflictDoNothing();
+    }
+
     // Create new child session
     await tx.insert(sessions).values({
       id: newSessionId,
@@ -335,27 +351,8 @@ export async function autoRemediate(sessionId: string, logs: string) {
       baseBranch: session.baseBranch,
       status: "queued",
       remediationDepth: session.remediationDepth + 1,
+      cascadeId: calculatedCascadeId,
     });
-
-    // Link lineage in cascades if applicable, or rely on remediationDepth
-    if (session.cascadeId) {
-       await tx.update(sessions)
-         .set({ cascadeId: session.cascadeId })
-         .where(eq(sessions.id, newSessionId));
-    } else {
-       // Insert a record into the cascades table linking the failed parentSessionId to the new childSessionId.
-       const newCascadeId = `cascade_remediate_${sessionId}_${Date.now()}`;
-       await tx.insert(cascades).values({
-         id: newCascadeId,
-         triggerSessionId: sessionId,
-         summary: `Auto-remediation cascade for session ${sessionId}`,
-         status: "analyzing",
-       }).onConflictDoNothing();
-
-       await tx.update(sessions)
-         .set({ cascadeId: newCascadeId })
-         .where(eq(sessions.id, newSessionId));
-    }
 
     // Transfer locks
     await LockManager.transferLocks(session.id, newSessionId, tx);
@@ -389,6 +386,8 @@ export async function autoRemediate(sessionId: string, logs: string) {
       .update(sessions)
       .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
       .where(eq(sessions.id, newSessionId));
+
+    await LockManager.releaseLocks(newSessionId);
 
     throw err;
   }

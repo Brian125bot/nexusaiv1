@@ -22,7 +22,7 @@ const remediationCascadeSchema = z.object({
   logs: z.string(),
 });
 
-export const cascadeRequestSchema = z.discriminatedUnion("type", [
+export const cascadeRequestSchema = z.union([
   initialCascadeSchema,
   remediationCascadeSchema,
 ]);
