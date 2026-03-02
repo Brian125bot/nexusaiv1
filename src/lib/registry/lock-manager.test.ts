@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { LockManager } from "./lock-manager";
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 describe("LockManager", () => {
   const TEST_SESSION_1 = "test-session-1";
@@ -81,4 +82,24 @@ describe("LockManager", () => {
     const conflicts = await LockManager.getConflictStatus(["/src/app/page.tsx"]);
     expect(conflicts.length).toBe(0);
   });
+
+  it("allows upgrading a shared lock to exclusive for the same session", async () => {
+    const sId = "test_upgrade_session";
+    await db.insert(sessions).values({ id: sId, branchName: "main" });
+
+    await LockManager.acquireLocks(sId, [
+      { filePath: "/src/upgrade_file.ts", type: "shared" },
+    ]);
+
+    const res = await LockManager.acquireLocks(sId, [
+      { filePath: "/src/upgrade_file.ts", type: "exclusive" },
+    ]);
+
+    expect(res.ok).toBe(true);
+
+    const locks = await db.select().from(fileLocks).where(eq(fileLocks.filePath, "/src/upgrade_file.ts"));
+    expect(locks).toHaveLength(1);
+    expect(locks[0].type).toBe("exclusive");
+  });
+
 });

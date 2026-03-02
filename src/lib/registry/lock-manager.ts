@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql, and } from "drizzle-orm";
 
 export type LockConflict = {
   filePath: string;
@@ -83,11 +83,35 @@ export class LockManager {
         };
       }
 
-      const alreadyLockedBySession = new Set(
-        (existingLocks.rows as Record<string, unknown>[])
-          .filter((row) => row.sessionId === sessionId)
-          .map((row) => row.filePath as string)
-      );
+// Check which paths are already locked by the session
+      // and determine if they need an upgrade to "exclusive"
+      const alreadyLockedBySession = new Set<string>();
+      const upgradablePaths: string[] = [];
+
+      for (const row of existingLocks.rows as Record<string, unknown>[]) {
+        if (row.sessionId === sessionId) {
+          const filePath = row.filePath as string;
+          alreadyLockedBySession.add(filePath);
+
+          const requestedType = uniqueIntentsMap.get(filePath);
+          if (row.type === "shared" && requestedType === "exclusive") {
+            upgradablePaths.push(filePath);
+          }
+        }
+      }
+
+      // Upgrade existing shared locks to exclusive
+      if (upgradablePaths.length > 0) {
+        await tx
+          .update(fileLocks)
+          .set({ type: "exclusive" })
+          .where(
+            and(
+              eq(fileLocks.sessionId, sessionId),
+              inArray(fileLocks.filePath, upgradablePaths)
+            )
+          );
+      }
 
       const newLocks = uniquePaths
         .filter((filePath) => !alreadyLockedBySession.has(filePath))
