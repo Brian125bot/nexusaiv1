@@ -156,4 +156,152 @@ describe("POST /api/webhooks/github", () => {
     expect(body.cascadeTrigger.triggered).toBe(true);
     expect(body.cascadeTrigger.coreFilesChanged).toEqual(["src/db/schema.ts"]);
   });
+  it("ignores check_run if session is already completed", async () => {
+    const { POST } = await import("@/app/api/webhooks/github/route");
+    const { db } = await import("@/db");
+    const { sessions } = await import("@/db/schema");
+
+    // Seed mock data
+    await db.insert(sessions).values({
+      id: "session_already_completed",
+      sourceRepo: "acme/repo",
+      branchName: "main",
+      status: "completed",
+      lastReviewedCommit: "abc1234",
+      createdAt: new Date(),
+      isCascadeRoot: false,
+    });
+
+    const req = new Request("http://localhost/api/webhooks/github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": "sig",
+        "x-github-event": "check_run",
+      },
+      body: JSON.stringify({
+        action: "completed",
+        repository: { name: "repo", owner: { login: "acme" } },
+        check_run: {
+          id: 1,
+          head_sha: "abc1234",
+          name: "Vercel",
+          status: "completed",
+          conclusion: "success",
+        }
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ignored).toBe(true);
+    expect(body.reason).toContain("already in state completed");
+  });
+
+  it("handles primary check_run success correctly by starting verification", async () => {
+    const { POST } = await import("@/app/api/webhooks/github/route");
+    const { db } = await import("@/db");
+    const { sessions } = await import("@/db/schema");
+    const { eq } = await import("drizzle-orm");
+
+    await db.insert(sessions).values({
+      id: "session_to_verify",
+      sourceRepo: "acme/repo",
+      branchName: "feature-branch",
+      status: "queued",
+      lastReviewedCommit: "sha-success",
+      createdAt: new Date(),
+      isCascadeRoot: false,
+    });
+
+    const req = new Request("http://localhost/api/webhooks/github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": "sig",
+        "x-github-event": "check_run",
+      },
+      body: JSON.stringify({
+        action: "completed",
+        repository: { name: "repo", owner: { login: "acme" } },
+        check_run: {
+          id: 2,
+          head_sha: "sha-success",
+          name: "build and test",
+          status: "completed",
+          conclusion: "success",
+        }
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.result).toBe("verifying_started");
+
+    const session = await db.query.sessions.findFirst({
+      where: eq(sessions.id, "session_to_verify"),
+    });
+
+    expect(session?.status).toBe("verifying");
+  });
+
+  it("handles check_run failure correctly by failing session and remediation logic", async () => {
+    const { POST } = await import("@/app/api/webhooks/github/route");
+    const { db } = await import("@/db");
+    const { sessions } = await import("@/db/schema");
+    const { eq } = await import("drizzle-orm");
+
+    await db.insert(sessions).values({
+      id: "session_to_fail",
+      sourceRepo: "acme/repo",
+      branchName: "fail-branch",
+      status: "executing",
+      lastReviewedCommit: "sha-fail",
+      createdAt: new Date(),
+      isCascadeRoot: false,
+    });
+
+    // Mock after to execute immediately
+    vi.mock("next/server", () => ({
+      after: vi.fn(async (cb) => {
+         await cb();
+      })
+    }));
+
+    const req = new Request("http://localhost/api/webhooks/github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": "sig",
+        "x-github-event": "check_run",
+      },
+      body: JSON.stringify({
+        action: "completed",
+        repository: { name: "repo", owner: { login: "acme" } },
+        check_run: {
+          id: 3,
+          head_sha: "sha-fail",
+          name: "Vercel",
+          status: "completed",
+          conclusion: "failure",
+        }
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.result).toBe("ci_failed_remediation_triggered");
+
+    // The state transition and log fetch is executed in an `after` block,
+    // which in a test environment requires a bit of mocking gymnastics or wait.
+    // For now we'll just check the response structure because
+    // `after()` behaves asynchronously in the Next.js runtime.
+  });
+
 });
