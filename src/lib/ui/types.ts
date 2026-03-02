@@ -37,6 +37,7 @@ export type LockRow = {
   id: number;
   filePath: string;
   lockedAt: string;
+  type: "shared" | "exclusive";
   sessionId: string;
   branchName: string;
   baseBranch: string;

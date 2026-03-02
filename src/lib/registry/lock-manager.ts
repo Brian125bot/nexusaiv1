@@ -1,10 +1,11 @@
 import { db } from "@/db";
 import { fileLocks, sessions } from "@/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
 export type LockConflict = {
   filePath: string;
   sessionId: string;
+  type: "shared" | "exclusive";
 };
 
 export type AcquireLockResult =
@@ -28,22 +29,52 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 export class LockManager {
-  static async acquireLocks(sessionId: string, filePaths: string[]): Promise<AcquireLockResult> {
-    const uniquePaths = [...new Set(filePaths)];
+  static async acquireLocks(
+    sessionId: string,
+    intents: Array<{ filePath: string; type: "shared" | "exclusive" }>
+  ): Promise<AcquireLockResult> {
+    const uniqueIntentsMap = new Map<string, "shared" | "exclusive">();
+    for (const intent of intents) {
+      // If same path is requested multiple times with different intent, elevate to exclusive
+      const existing = uniqueIntentsMap.get(intent.filePath);
+      if (existing === "exclusive" || intent.type === "exclusive") {
+        uniqueIntentsMap.set(intent.filePath, "exclusive");
+      } else {
+        uniqueIntentsMap.set(intent.filePath, "shared");
+      }
+    }
+
+    const uniquePaths = Array.from(uniqueIntentsMap.keys());
     if (uniquePaths.length === 0) {
       return { ok: true, lockedFiles: [] };
     }
 
     return await db.transaction(async (tx) => {
-      const existingLocks = await tx
-        .select({
-          filePath: fileLocks.filePath,
-          sessionId: fileLocks.sessionId,
-        })
-        .from(fileLocks)
-        .where(inArray(fileLocks.filePath, uniquePaths));
+      // Using FOR UPDATE to serialize access to the locked files
+      const existingLocks = await tx.execute(sql`
+        SELECT session_id as "sessionId", file_path as "filePath", type
+        FROM file_locks
+        WHERE file_path IN ${uniquePaths}
+        FOR UPDATE
+      `);
 
-      const conflicts = existingLocks.filter((lock) => lock.sessionId !== sessionId);
+      const conflicts: LockConflict[] = [];
+      for (const row of existingLocks.rows as Record<string, unknown>[]) {
+        const requestedType = uniqueIntentsMap.get(row.filePath as string);
+        if (row.sessionId !== sessionId) {
+          // Rule 1: Requesting shared, existing is exclusive -> Conflict
+          // Rule 2: Requesting shared, existing is shared -> Grant (No conflict added)
+          // Rule 3: Requesting exclusive, existing is any -> Conflict
+          if (requestedType === "exclusive" || row.type === "exclusive") {
+            conflicts.push({
+              filePath: row.filePath as string,
+              sessionId: row.sessionId as string,
+              type: row.type as "shared" | "exclusive",
+            });
+          }
+        }
+      }
+
       if (conflicts.length > 0) {
         return {
           ok: false,
@@ -52,12 +83,18 @@ export class LockManager {
         };
       }
 
-      const alreadyLockedBySession = new Set(existingLocks.map((lock) => lock.filePath));
+      const alreadyLockedBySession = new Set(
+        (existingLocks.rows as Record<string, unknown>[])
+          .filter((row) => row.sessionId === sessionId)
+          .map((row) => row.filePath as string)
+      );
+
       const newLocks = uniquePaths
         .filter((filePath) => !alreadyLockedBySession.has(filePath))
         .map((filePath) => ({
           sessionId,
           filePath,
+          type: uniqueIntentsMap.get(filePath)!,
         }));
 
       if (newLocks.length === 0) {
@@ -82,6 +119,7 @@ export class LockManager {
           .select({
             filePath: fileLocks.filePath,
             sessionId: fileLocks.sessionId,
+            type: fileLocks.type,
           })
           .from(fileLocks)
           .where(inArray(fileLocks.filePath, uniquePaths));
@@ -89,7 +127,9 @@ export class LockManager {
         return {
           ok: false,
           reason: "conflict" as const,
-          conflicts: contestedLocks.filter((lock) => lock.sessionId !== sessionId),
+          conflicts: contestedLocks
+            .filter((lock) => lock.sessionId !== sessionId)
+            .map(lock => ({ filePath: lock.filePath, sessionId: lock.sessionId, type: lock.type as "shared" | "exclusive" })),
         };
       }
     });
@@ -100,11 +140,14 @@ export class LockManager {
    * If not, it creates new locks for the given session.
    * 
    * @param sessionId The Jules Session ID requesting the locks
-   * @param filePaths List of absolute paths to be locked
+   * @param intents List of absolute paths and their intents to be locked
    * @returns boolean true if locks were successfully acquired, false otherwise
    */
-  static async requestLock(sessionId: string, filePaths: string[]): Promise<boolean> {
-    const result = await LockManager.acquireLocks(sessionId, filePaths);
+  static async requestLock(
+    sessionId: string,
+    intents: Array<{ filePath: string; type: "shared" | "exclusive" }>
+  ): Promise<boolean> {
+    const result = await LockManager.acquireLocks(sessionId, intents);
     return result.ok;
   }
 
@@ -121,6 +164,7 @@ export class LockManager {
       .select({
         sessionId: fileLocks.sessionId,
         filePath: fileLocks.filePath,
+        type: fileLocks.type,
         lockedAt: fileLocks.lockedAt,
         sessionStatus: sessions.status,
         branchName: sessions.branchName,

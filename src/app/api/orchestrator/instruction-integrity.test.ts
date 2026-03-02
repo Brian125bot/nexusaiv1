@@ -180,7 +180,7 @@ describe("Instruction Integrity Test - Lock Cleanup", () => {
     const { LockManager } = await import("@/lib/registry/lock-manager");
 
     // Simulate acquiring locks for a test session
-    const lockResult = await LockManager.acquireLocks(testSessionId!, ["src/test-file-1.ts", "src/test-file-2.ts"]);
+    const lockResult = await LockManager.acquireLocks(testSessionId!, [{ filePath: "src/test-file-1.ts", type: "exclusive" as const }, { filePath: "src/test-file-2.ts", type: "exclusive" as const }]);
     
     expect(lockResult.ok).toBe(true);
     

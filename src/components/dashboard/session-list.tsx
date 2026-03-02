@@ -7,7 +7,7 @@ import { AuditorReport } from "@/components/dashboard/auditor-report";
 import { fetcher, jsonRequest } from "@/lib/ui/fetcher";
 import { initialAuditorReportState, streamOrchestratorReport } from "@/lib/ui/sse-client";
 import { swrKeys } from "@/lib/ui/swr-keys";
-import type { AuditorReportState, Goal, Session } from "@/lib/ui/types";
+import type { AuditorReportState, Goal, Session, LockRow } from "@/lib/ui/types";
 
 export function SessionList() {
   const {
@@ -20,7 +20,7 @@ export function SessionList() {
   const { data: goalsData, mutate: mutateGoals } = useSWR<{ goals: Goal[] }>(swrKeys.goals, fetcher, {
     refreshInterval: 15000,
   });
-  const { mutate: mutateLocks } = useSWR(swrKeys.locks, fetcher, {
+  const { data: locksData, mutate: mutateLocks } = useSWR<{ locks: LockRow[] }>(swrKeys.locks, fetcher, {
     refreshInterval: 15000,
   });
 
@@ -290,10 +290,23 @@ export function SessionList() {
           <p className="mt-2 text-sm text-slate-500">No active sessions.</p>
         ) : (
           <div className="mt-3 space-y-2">
-            {activeSessions.map((session) => (
+            {activeSessions.map((session) => {
+              const sessionLocks = (locksData?.locks ?? []).filter((l) => l.sessionId === session.id);
+              return (
               <article key={session.id} className="rounded-lg border border-slate-700 bg-slate-950/80 p-3">
                 <p className="text-sm font-semibold text-slate-100">{session.branchName}</p>
                 <p className="text-xs text-slate-400">{session.sourceRepo}</p>
+
+                {sessionLocks.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {sessionLocks.map(lock => (
+                      <span key={lock.filePath} className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border ${lock.type === "shared" ? "text-blue-400 border-blue-900/50 bg-blue-900/20" : "text-rose-400 border-rose-900/50 bg-rose-900/20"}`}>
+                        <span aria-hidden="true">{lock.type === "shared" ? "👁️" : "🔒"}</span> {lock.filePath}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
                 <p className="mt-1 text-xs text-slate-300">Status: {session.status}</p>
                 {session.status === "executing" || session.status === "verifying" ? (
                   <button
@@ -315,8 +328,8 @@ export function SessionList() {
                     Open Jules Session
                   </a>
                 ) : null}
-              </article>
-            ))}
+              </article>)
+            })}
           </div>
         )}
       </section>

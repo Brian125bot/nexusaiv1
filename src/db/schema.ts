@@ -1,8 +1,9 @@
-import { pgTable, uuid, text, serial, timestamp, jsonb, pgEnum, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, serial, timestamp, jsonb, pgEnum, integer, boolean, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const goalStatusEnum = pgEnum("goal_status", ["backlog", "in-progress", "completed", "drifted"]);
 export const sessionStatusEnum = pgEnum("session_status", ["queued", "executing", "verifying", "completed", "failed"]);
 export const cascadeStatusEnum = pgEnum("cascade_status", ["analyzing", "dispatched", "completed", "failed"]);
+export const lockTypeEnum = pgEnum("lock_type", ["shared", "exclusive"]);
 
 export interface AcceptanceCriterion {
   id: string;
@@ -57,6 +58,9 @@ export const sessions = pgTable("sessions", {
 export const fileLocks = pgTable("file_locks", {
   id: serial("id").primaryKey(),
   sessionId: text("session_id").references(() => sessions.id, { onDelete: 'cascade' }).notNull(),
-  filePath: text("file_path").unique().notNull(),
+  filePath: text("file_path").notNull(),
+  type: lockTypeEnum("type").default("exclusive").notNull(),
   lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [
+  uniqueIndex("unq_file_session").on(t.filePath, t.sessionId),
+]);
