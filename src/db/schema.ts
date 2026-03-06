@@ -34,6 +34,7 @@ export const cascades = pgTable("cascades", {
   repairJobCount: integer("repair_job_count").default(0).notNull(),
   summary: text("summary"),
   status: cascadeStatusEnum("status").default("analyzing").notNull(),
+  isAstVerified: boolean("is_ast_verified").default(false).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
