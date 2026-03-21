@@ -137,7 +137,6 @@ export async function POST(req: Request) {
           prompt: enrichedPrompt,
           sourceRepo,
           startingBranch: baseBranch,
-          auditorContext: `cascade:${cascadeId};batch:${batchId};job:${job.id};files:${job.files.join(",")}`,
         });
 
         await db

@@ -456,7 +456,6 @@ export async function reviewPr(input: ReviewPrInput): Promise<ReviewResult> {
           prompt: remediationPrompt,
           sourceRepo: session.sourceRepo,
           startingBranch: session.baseBranch ?? session.branchName,
-          auditorContext: `semantic-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};goal:${goal.id}`,
         });
 
         await db

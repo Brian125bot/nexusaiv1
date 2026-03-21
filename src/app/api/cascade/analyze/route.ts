@@ -223,7 +223,6 @@ export async function POST(req: Request) {
             prompt: sessionPrompt,
             sourceRepo,
             startingBranch: branch,
-            auditorContext: `cascade:${cascadeId};job:${job.id};files:${job.files.join(",")}`,
           });
 
           await db
