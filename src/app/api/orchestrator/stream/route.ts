@@ -302,7 +302,6 @@ export async function POST(req: Request) {
                       prompt: toolPrompt,
                       sourceRepo: toolSourceRepo,
                       startingBranch: toolStartingBranch,
-                      auditorContext: `goalId=${goalId}; internalSessionId=${internalSessionId}; impactFiles=${uniqueImpactFiles.join(",")}`,
                     });
 
                     await db

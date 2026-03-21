@@ -26,7 +26,6 @@ export type JulesCreateSessionInput = {
   prompt: string;
   sourceRepo: string;
   startingBranch: string;
-  auditorContext: string;
 };
 
 export type JulesSession = z.infer<typeof getSessionResponseSchema>;
@@ -70,7 +69,7 @@ export class JulesClient {
 
   async createSession(input: JulesCreateSessionInput): Promise<{ id: string; url: string }> {
     const payload = {
-      prompt: `${input.prompt}\n\n--- AUDITOR CONTEXT ---\n${input.auditorContext}\n--- END AUDITOR CONTEXT ---`,
+      prompt: input.prompt,
       sourceContext: {
         source: `sources/github/${input.sourceRepo}`,
         githubRepoContext: {

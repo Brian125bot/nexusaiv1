@@ -226,7 +226,6 @@ export async function dispatchCascadeRepairs(
         prompt: sessionPrompt,
         sourceRepo,
         startingBranch: baseBranch,
-        auditorContext: `cascade:${cascadeId};job:${job.id};files:${job.files.join(",")}`,
       });
 
       results.push({
@@ -390,7 +389,6 @@ export async function autoRemediate(sessionId: string, logs: string) {
       prompt,
       sourceRepo: session.sourceRepo,
       startingBranch: session.branchName,
-      auditorContext: `auto-remediate;parentSession:${session.id};depth:${session.remediationDepth + 1}`,
     });
 
     await db
