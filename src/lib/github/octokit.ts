@@ -149,6 +149,34 @@ export class GitHubClient {
       body,
     });
   }
+
+  async findOpenPullRequestNumber(owner: string, repo: string, branch: string): Promise<number | null> {
+    const octokit = this.getOctokit();
+    const response = await octokit.pulls.list({
+      owner,
+      repo,
+      state: "open",
+      head: `${owner}:${branch}`,
+      per_page: 1,
+    });
+
+    return response.data[0]?.number ?? null;
+  }
+
+  async mergePullRequest(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    mergeMethod: "merge" | "squash" | "rebase" = "squash",
+  ): Promise<void> {
+    const octokit = this.getOctokit();
+    await octokit.pulls.merge({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      merge_method: mergeMethod,
+    });
+  }
 }
 
 export const githubClient = new GitHubClient();

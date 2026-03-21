@@ -20,19 +20,21 @@ const google = createGoogleGenerativeAI({
 const AUDITOR_MODEL = "gemini-3-flash-preview";
 const activeSessionStatuses = ["queued", "executing", "verifying"] as const;
 
-const reviewSchema = z.object({
-  severity: z.enum(["none", "minor", "major"]),
+const semanticReviewSchema = z.object({
+  decision: z.enum(["approve", "remediate", "reject"]),
   summary: z.string().min(1),
   findings: z.array(z.string().min(1)).default([]),
-  recommendedFixPrompt: z.string().min(1).optional(),
-  criteriaAssessment: z.record(
-    z.string(),
-    z.object({
-      met: z.boolean(),
-      reasoning: z.string(),
-      evidenceFiles: z.array(z.string()),
-    })
-  ).optional(),
+  remediationPrompt: z.string().min(1).optional(),
+  criteriaAssessment: z
+    .record(
+      z.string(),
+      z.object({
+        met: z.boolean(),
+        reasoning: z.string(),
+        evidenceFiles: z.array(z.string()),
+      }),
+    )
+    .optional(),
 });
 
 export type ReviewInput = {
@@ -44,14 +46,23 @@ export type ReviewInput = {
   prNumber?: number;
 };
 
+export type ReviewPrInput = {
+  sessionId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  sha: string;
+  prNumber?: number;
+};
+
 export type ReviewResult = {
   outcome:
-  | "review_posted"
-  | "duplicate_commit_skipped"
-  | "no_active_session"
-  | "missing_goal"
-  | "empty_diff_skipped";
-  severity?: z.infer<typeof reviewSchema>["severity"];
+    | "review_posted"
+    | "duplicate_commit_skipped"
+    | "no_active_session"
+    | "missing_goal"
+    | "empty_diff_skipped";
+  decision?: z.infer<typeof semanticReviewSchema>["decision"];
   sessionId?: string;
   goalId?: string;
   commentTarget?: "pull_request" | "commit";
@@ -65,16 +76,16 @@ export type ReviewResult = {
 };
 
 function buildReviewComment(input: {
-  severity: "none" | "minor" | "major";
+  decision: "approve" | "remediate" | "reject";
   summary: string;
   findings: string[];
-  recommendedFixPrompt?: string;
+  remediationPrompt?: string;
   goalId: string;
 }): string {
   const lines: string[] = [
     "## Nexus Auditor Review",
     `Goal: ${input.goalId}`,
-    `Severity: ${input.severity.toUpperCase()}`,
+    `Decision: ${input.decision.toUpperCase()}`,
     "",
     input.summary,
   ];
@@ -86,19 +97,42 @@ function buildReviewComment(input: {
     }
   }
 
-  if (input.severity === "major") {
-    lines.push(
-      "",
-      "### Manual Action",
-      "Major drift detected. Automatic Jules execution from webhook is disabled by policy.",
-    );
+  if (input.decision === "remediate" && input.remediationPrompt) {
+    lines.push("", "### Remediation Prompt", "```text", input.remediationPrompt, "```");
+  }
 
-    if (input.recommendedFixPrompt) {
-      lines.push("Suggested Jules prompt:", "```text", input.recommendedFixPrompt, "```");
-    }
+  if (input.decision === "reject") {
+    lines.push("", "### Architectural Violation", "Changes rejected against Acceptance Criteria.");
   }
 
   return lines.join("\n");
+}
+
+function updateCriteriaAssessment(
+  acceptanceCriteria: AcceptanceCriterion[],
+  assessment: z.infer<typeof semanticReviewSchema>["criteriaAssessment"],
+): { updated: AcceptanceCriterion[]; hasFailure: boolean } {
+  let hasFailure = false;
+
+  const updated = acceptanceCriteria.map((criterion) => {
+    const result = assessment?.[criterion.id];
+    if (!result) {
+      return criterion;
+    }
+
+    if (!result.met) {
+      hasFailure = true;
+    }
+
+    return {
+      ...criterion,
+      met: result.met,
+      reasoning: result.reasoning,
+      files: result.evidenceFiles,
+    };
+  });
+
+  return { updated, hasFailure };
 }
 
 export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResult> {
@@ -117,201 +151,282 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     return { outcome: "no_active_session" };
   }
 
-  if (session.lastReviewedCommit && session.lastReviewedCommit === input.sha) {
-    return {
-      outcome: "duplicate_commit_skipped",
-      sessionId: session.id,
-      goalId: session.goalId ?? undefined,
-    };
-  }
+  return reviewPr({
+    sessionId: session.id,
+    owner: input.owner,
+    repo: input.repo,
+    branch: input.branch,
+    sha: input.sha,
+    prNumber: input.prNumber,
+  });
+}
 
-  if (!session.goalId) {
-    return {
-      outcome: "missing_goal",
-      sessionId: session.id,
-    };
-  }
+export async function reviewPr(input: ReviewPrInput): Promise<ReviewResult> {
+  const sourceRepo = `${input.owner}/${input.repo}`;
 
-  const goal = await db.query.goals.findFirst({ where: eq(goals.id, session.goalId) });
-
-  if (!goal) {
-    return {
-      outcome: "missing_goal",
-      sessionId: session.id,
-      goalId: session.goalId,
-    };
-  }
-
-  const diff =
-    input.eventType === "pull_request" && input.prNumber
-      ? await githubClient.getPullRequestDiff(input.owner, input.repo, input.prNumber)
-      : await githubClient.getCommitDiff(input.owner, input.repo, input.sha);
-
-  if (!diff.trim()) {
-    return {
-      outcome: "empty_diff_skipped",
-      sessionId: session.id,
-      goalId: goal.id,
-    };
-  }
-
-  // Extract changed files from diff for cascade analysis
-  const changedFiles = extractChangedFilesFromDiff(diff);
-  const fileChanges: FileChange[] = changedFiles.map(filePath => ({
-    filePath,
-    diff: diff,
-    status: "modified" as const,
-  }));
-  const coreFilesChanged = detectCoreFileChanges(changedFiles);
-  const astDownstreamFiles = coreFilesChanged.length > 0
-    ? await findDownstreamDependents(coreFilesChanged)
-    : [];
-
-  // Run cascade analysis in parallel with regular review
-  const [reviewAnalysis, cascadeResult] = await Promise.all([
-    generateObject({
-      model: google(AUDITOR_MODEL),
-      schema: reviewSchema,
-      system:
-        "You are the Nexus Auditor. Review this diff against the project's Acceptance Criteria. Identify any architectural drift, hardcoded secrets, or logic errors. Evaluate if each criterion in the provided list has been met based on the diff. In `criteriaAssessment`, provide an object mapped by criterion `id` containing `met`, `reasoning`, and `evidenceFiles` (paths of files proving the state).",
-      prompt: [
-        `Repository: ${sourceRepo}`,
-        `Branch: ${input.branch}`,
-        `Commit SHA: ${input.sha}`,
-        "Acceptance Criteria:",
-        JSON.stringify(goal.acceptanceCriteria ?? [], null, 2),
-        "Git Diff:",
-        diff,
-      ].join("\n\n"),
-      providerOptions: {
-        google: {
-          thinkingConfig: {
-            thinkingLevel: "medium",
-          },
-        },
-      },
-    }),
-    analyzeCascade(fileChanges, astDownstreamFiles),
-  ]);
-
-  const assessment = reviewAnalysis.object.criteriaAssessment;
-  let hasFailure = false;
-
-  // Update Goal Acceptance Criteria
-  if (assessment && goal.acceptanceCriteria && Array.isArray(goal.acceptanceCriteria)) {
-    const criteria = goal.acceptanceCriteria as AcceptanceCriterion[];
-    const updatedCriteria = criteria.map((c) => {
-      const result = assessment[c.id];
-      if (result) {
-        if (!result.met) hasFailure = true;
-        return {
-          ...c,
-          met: result.met,
-          reasoning: result.reasoning,
-          files: result.evidenceFiles,
-        };
-      }
-      return c;
-    });
-
-    await db.update(goals)
-      .set({ acceptanceCriteria: updatedCriteria })
-      .where(eq(goals.id, goal.id));
-  } else if (reviewAnalysis.object.severity === "major") {
-    hasFailure = true;
-  }
-
-  const comment = buildReviewComment({
-    severity: reviewAnalysis.object.severity,
-    summary: reviewAnalysis.object.summary,
-    findings: reviewAnalysis.object.findings,
-    recommendedFixPrompt: reviewAnalysis.object.recommendedFixPrompt,
-    goalId: goal.id,
+  const session = await db.query.sessions.findFirst({
+    where: eq(sessions.id, input.sessionId),
   });
 
-  // Append cascade information to comment if detected
-  const finalComment = cascadeResult.isCascade
-    ? `${comment}\n\n---\n\n## 🌊 Blast Radius Cascade Detected\n\n**Core Files Changed:** ${cascadeResult.coreFilesChanged.join(", ")}\n\n**Downstream Files Affected:** ${cascadeResult.downstreamFiles.length}\n\n**Repair Jobs Identified:** ${cascadeResult.repairJobs.length}\n\n${cascadeResult.summary}\n\n> Cascade ID: \`${session.id}-cascade\``
-    : comment;
-
-  if (input.eventType === "pull_request" && input.prNumber) {
-    await githubClient.postPullRequestComment(input.owner, input.repo, input.prNumber, finalComment);
-  } else {
-    await githubClient.postCommitComment(input.owner, input.repo, input.sha, finalComment);
+  if (!session) {
+    return { outcome: "no_active_session" };
   }
 
-  if (cascadeResult.isCascade) {
-    const cascadeId = `${session.id}-cascade`;
-    await db.insert(cascades).values({
-      id: cascadeId,
-      triggerSessionId: session.id,
-      coreFilesChanged: cascadeResult.coreFilesChanged,
-      downstreamFiles: cascadeResult.downstreamFiles,
-      repairJobCount: cascadeResult.repairJobs.length,
-      summary: cascadeResult.summary,
-      status: "analyzing",
-    }).onConflictDoNothing();
-  }
-
+  let locksTransferred = false;
   let remediationTriggered = false;
   let newSessionId: string | undefined;
 
-  if (hasFailure) {
-    if (session.remediationDepth >= 3) {
-      console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id}. Marking goal as drifted.`);
+  try {
+    if (session.lastReviewedCommit && session.lastReviewedCommit === input.sha) {
+      return {
+        outcome: "duplicate_commit_skipped",
+        sessionId: session.id,
+        goalId: session.goalId ?? undefined,
+      };
+    }
 
-      const manualInterventionMsg = "Maximum remediation depth reached. Manual intervention required.";
+    if (!session.goalId) {
+      return {
+        outcome: "missing_goal",
+        sessionId: session.id,
+        goalId: session.goalId ?? undefined,
+      };
+    }
 
-      // Append the manual intervention message to findings or summary
-      await db.update(sessions)
+    const goal = await db.query.goals.findFirst({
+      where: eq(goals.id, session.goalId),
+    });
+
+    if (!goal) {
+      return {
+        outcome: "missing_goal",
+        sessionId: session.id,
+        goalId: session.goalId,
+      };
+    }
+
+    const acceptanceCriteria = Array.isArray(goal.acceptanceCriteria)
+      ? (goal.acceptanceCriteria as AcceptanceCriterion[])
+      : [];
+
+    const diff =
+      input.prNumber !== undefined
+        ? await githubClient.getPullRequestDiff(input.owner, input.repo, input.prNumber)
+        : await githubClient.getCommitDiff(input.owner, input.repo, input.sha);
+
+    if (!diff.trim()) {
+      await db
+        .update(sessions)
         .set({
-          status: "failed",
-          lastError: manualInterventionMsg
+          status: "completed",
+          lastReviewedCommit: input.sha,
+          lastSyncedAt: new Date(),
         })
         .where(eq(sessions.id, session.id));
 
-      await db.update(goals)
-        .set({
-          status: "drifted",
-          description: goal.description ? `${goal.description}\n\n${manualInterventionMsg}` : manualInterventionMsg
-        })
-        .where(eq(goals.id, goal.id));
+      return {
+        outcome: "empty_diff_skipped",
+        sessionId: session.id,
+        goalId: goal.id,
+      };
+    }
+
+    const changedFiles = extractChangedFilesFromDiff(diff);
+    const fileChanges: FileChange[] = changedFiles.map((filePath) => ({
+      filePath,
+      diff,
+      status: "modified",
+    }));
+    const coreFilesChanged = detectCoreFileChanges(changedFiles);
+    const astDownstreamFiles = coreFilesChanged.length > 0 ? await findDownstreamDependents(coreFilesChanged) : [];
+
+    const [reviewAnalysis, cascadeResult] = await Promise.all([
+      generateObject({
+        model: google(AUDITOR_MODEL),
+        schema: semanticReviewSchema,
+        system:
+          "You are the Nexus Semantic Auditor. Evaluate code changes strictly against the provided Acceptance Criteria. Return decision=approve only when criteria are satisfied and architecture is coherent. Return decision=remediate when fixes are feasible in-place. Return decision=reject when changes violate architecture or intent and should be blocked.",
+        prompt: [
+          `Repository: ${sourceRepo}`,
+          `Branch: ${input.branch}`,
+          `Commit SHA: ${input.sha}`,
+          "Acceptance Criteria:",
+          JSON.stringify(acceptanceCriteria, null, 2),
+          "Git Diff:",
+          diff,
+          "Output instructions:",
+          "- Set decision to one of: approve, remediate, reject",
+          "- Provide criteriaAssessment keyed by criterion id with met/reasoning/evidenceFiles",
+          "- Do not skip criteria; be explicit",
+        ].join("\n\n"),
+        providerOptions: {
+          google: {
+            thinkingConfig: {
+              thinkingLevel: "medium",
+            },
+          },
+        },
+      }),
+      analyzeCascade(fileChanges, astDownstreamFiles),
+    ]);
+
+    const assessment = reviewAnalysis.object.criteriaAssessment;
+    const { updated: updatedCriteria, hasFailure } = updateCriteriaAssessment(acceptanceCriteria, assessment);
+
+    await db
+      .update(goals)
+      .set({ acceptanceCriteria: updatedCriteria })
+      .where(eq(goals.id, goal.id));
+
+    const comment = buildReviewComment({
+      decision: reviewAnalysis.object.decision,
+      summary: reviewAnalysis.object.summary,
+      findings: reviewAnalysis.object.findings,
+      remediationPrompt: reviewAnalysis.object.remediationPrompt,
+      goalId: goal.id,
+    });
+
+    const finalComment = cascadeResult.isCascade
+      ? `${comment}\n\n---\n\n## Blast Radius Cascade Detected\n\n**Core Files Changed:** ${cascadeResult.coreFilesChanged.join(", ")}\n\n**Downstream Files Affected:** ${cascadeResult.downstreamFiles.length}\n\n**Repair Jobs Identified:** ${cascadeResult.repairJobs.length}\n\n${cascadeResult.summary}`
+      : comment;
+
+    const resolvedPrNumber = input.prNumber ?? (await githubClient.findOpenPullRequestNumber(input.owner, input.repo, input.branch));
+
+    if (resolvedPrNumber !== null) {
+      await githubClient.postPullRequestComment(input.owner, input.repo, resolvedPrNumber, finalComment);
     } else {
-      // Remediation Trigger: Dispatch a new "Fix-up" session
+      await githubClient.postCommitComment(input.owner, input.repo, input.sha, finalComment);
+    }
+
+    if (cascadeResult.isCascade) {
+      const cascadeId = `${session.id}-cascade`;
+      await db
+        .insert(cascades)
+        .values({
+          id: cascadeId,
+          triggerSessionId: session.id,
+          coreFilesChanged: cascadeResult.coreFilesChanged,
+          downstreamFiles: cascadeResult.downstreamFiles,
+          repairJobCount: cascadeResult.repairJobs.length,
+          summary: cascadeResult.summary,
+          status: "analyzing",
+          isAstVerified: true,
+        })
+        .onConflictDoNothing();
+    }
+
+    const decision = reviewAnalysis.object.decision;
+    const effectiveDecision = hasFailure && decision === "approve" ? "remediate" : decision;
+
+    if (effectiveDecision === "approve") {
+      if (resolvedPrNumber === null) {
+        throw new Error("Semantic approval requires an open pull request for merge");
+      }
+
+      await githubClient.mergePullRequest(input.owner, input.repo, resolvedPrNumber, "squash");
+
+      await db.transaction(async (tx) => {
+        await tx
+          .update(goals)
+          .set({ status: "completed", acceptanceCriteria: updatedCriteria })
+          .where(eq(goals.id, goal.id));
+
+        await tx
+          .update(sessions)
+          .set({
+            status: "completed",
+            lastReviewedCommit: input.sha,
+            lastSyncedAt: new Date(),
+            lastError: null,
+          })
+          .where(eq(sessions.id, session.id));
+      });
+
+      return {
+        outcome: "review_posted",
+        decision: effectiveDecision,
+        sessionId: session.id,
+        goalId: goal.id,
+        commentTarget: resolvedPrNumber !== null ? "pull_request" : "commit",
+        cascadeAnalysis: {
+          isCascade: cascadeResult.isCascade,
+          coreFilesChanged: cascadeResult.coreFilesChanged,
+          repairJobCount: cascadeResult.repairJobs.length,
+        },
+        remediationTriggered,
+      };
+    }
+
+    if (effectiveDecision === "remediate") {
+      if (session.remediationDepth >= 3) {
+        const manualInterventionMsg = "Maximum remediation depth reached. Manual intervention required.";
+
+        await db.transaction(async (tx) => {
+          await tx
+            .update(sessions)
+            .set({
+              status: "failed",
+              lastReviewedCommit: input.sha,
+              lastError: manualInterventionMsg,
+            })
+            .where(eq(sessions.id, session.id));
+
+          await tx
+            .update(goals)
+            .set({
+              status: "drifted",
+              description: goal.description ? `${goal.description}\n\n${manualInterventionMsg}` : manualInterventionMsg,
+            })
+            .where(eq(goals.id, goal.id));
+        });
+
+        return {
+          outcome: "review_posted",
+          decision: "reject",
+          sessionId: session.id,
+          goalId: goal.id,
+          commentTarget: resolvedPrNumber !== null ? "pull_request" : "commit",
+          cascadeAnalysis: {
+            isCascade: cascadeResult.isCascade,
+            coreFilesChanged: cascadeResult.coreFilesChanged,
+            repairJobCount: cascadeResult.repairJobs.length,
+          },
+          remediationTriggered: false,
+        };
+      }
+
       newSessionId = `remediate-${crypto.randomUUID()}`;
 
-      // Build a rich, context-aware prompt for the repair agent.
-      const fixContext = reviewAnalysis.object.recommendedFixPrompt
-        ? reviewAnalysis.object.recommendedFixPrompt
+      const fixContext = reviewAnalysis.object.remediationPrompt
+        ? reviewAnalysis.object.remediationPrompt
         : reviewAnalysis.object.findings.join("\n");
 
       const remediationPrompt = [
-        `## Nexus Remediation Task`,
-        ``,
+        "## Nexus Semantic Remediation Task",
+        "",
         `**Remediation Depth:** ${session.remediationDepth + 1} / 3`,
         `**Parent Session:** ${session.id}`,
         `**Goal:** ${goal.id}`,
         `**Repository:** ${session.sourceRepo}`,
         `**Branch:** ${session.branchName}`,
-        ``,
-        `### Auditor Findings`,
-        `**Severity:** ${reviewAnalysis.object.severity.toUpperCase()}`,
-        `**Summary:** ${reviewAnalysis.object.summary}`,
-        ``,
-        `### Required Fix`,
+        "",
+        "### Acceptance Criteria",
+        ...updatedCriteria.map((criterion) => `- [${criterion.met ? "x" : " "}] ${criterion.text}`),
+        "",
+        "### Auditor Summary",
+        reviewAnalysis.object.summary,
+        "",
+        "### Required Fix",
         fixContext,
-        ``,
-        `### Constraints`,
+        "",
+        "### Constraints",
         `- Work on the existing branch: \`${session.branchName}\``,
-        `- Only modify files necessary to satisfy the above findings`,
-        `- Do NOT introduce new dependencies unless absolutely required`,
-        `- Ensure TypeScript compiles cleanly after your changes`,
-        `- Commit with message: \`fix: nexus remediation [Nexus-Auto]\``,
+        "- Only modify files necessary to satisfy the findings",
+        "- Do NOT introduce new dependencies unless absolutely required",
+        "- Ensure TypeScript compiles cleanly after your changes",
+        "- Commit with message: `fix: semantic remediation [Nexus-Auto]`",
       ].join("\n");
 
-      console.log(`🛠️ Nexus: Remediation triggered for session ${session.id}. Depth: ${session.remediationDepth + 1}`);
-
-      // Insert the queued session record and transfer locks atomically.
       await db.transaction(async (tx) => {
         await tx.insert(sessions).values({
           id: newSessionId!,
@@ -323,73 +438,107 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
           remediationDepth: session.remediationDepth + 1,
         });
 
-        // Atomic Handoff: Transfer file locks to the incoming repair session.
         await LockManager.transferLocks(session.id, newSessionId!, tx);
+        locksTransferred = true;
+
+        await tx
+          .update(sessions)
+          .set({
+            status: "failed",
+            lastReviewedCommit: input.sha,
+            lastError: "Semantic remediation dispatched to child session",
+          })
+          .where(eq(sessions.id, session.id));
       });
 
-      // DISPATCH: Eagerly kick off the Jules agent now rather than waiting
-      // for a background poller that may never arrive.
       try {
         const julesSession = await julesClient.createSession({
           prompt: remediationPrompt,
           sourceRepo: session.sourceRepo,
           startingBranch: session.baseBranch ?? session.branchName,
-          auditorContext: `remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};goal:${goal.id}`,
+          auditorContext: `semantic-remediation;parentSession:${session.id};depth:${session.remediationDepth + 1};goal:${goal.id}`,
         });
 
-        // Persist the external ID so syncSessionStatus can poll Jules for progress.
         await db
           .update(sessions)
           .set({ status: "executing", externalSessionId: julesSession.id, julesSessionUrl: julesSession.url })
           .where(eq(sessions.id, newSessionId!));
-
-        console.log(`🚀 Nexus: Jules remediation agent dispatched. External session: ${julesSession.id}`);
       } catch (dispatchErr) {
-        // Dispatch failed — mark the new session as failed so it doesn't hang in queued state.
         const errMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-        console.error(`❌ Nexus: Failed to dispatch Jules remediation agent:`, dispatchErr);
         await db
           .update(sessions)
           .set({ status: "failed", lastError: `Jules dispatch failed: ${errMsg}`.substring(0, 5000) })
           .where(eq(sessions.id, newSessionId!));
+
+        await LockManager.releaseLocks(newSessionId!);
       }
 
       remediationTriggered = true;
+
+      return {
+        outcome: "review_posted",
+        decision: effectiveDecision,
+        sessionId: session.id,
+        goalId: goal.id,
+        commentTarget: resolvedPrNumber !== null ? "pull_request" : "commit",
+        cascadeAnalysis: {
+          isCascade: cascadeResult.isCascade,
+          coreFilesChanged: cascadeResult.coreFilesChanged,
+          repairJobCount: cascadeResult.repairJobs.length,
+        },
+        remediationTriggered,
+        newSessionId,
+      };
+    }
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(sessions)
+        .set({
+          status: "failed",
+          lastReviewedCommit: input.sha,
+          lastError: `Semantic audit reject: ${reviewAnalysis.object.summary}`.substring(0, 5000),
+        })
+        .where(eq(sessions.id, session.id));
+
+      await tx.update(goals).set({ status: "drifted" }).where(eq(goals.id, goal.id));
+    });
+
+    return {
+      outcome: "review_posted",
+      decision: effectiveDecision,
+      sessionId: session.id,
+      goalId: goal.id,
+      commentTarget: resolvedPrNumber !== null ? "pull_request" : "commit",
+      cascadeAnalysis: {
+        isCascade: cascadeResult.isCascade,
+        coreFilesChanged: cascadeResult.coreFilesChanged,
+        repairJobCount: cascadeResult.repairJobs.length,
+      },
+      remediationTriggered,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    await db
+      .update(sessions)
+      .set({
+        status: "failed",
+        lastError: `Semantic auditor failure: ${message}`.substring(0, 5000),
+        lastReviewedCommit: input.sha,
+      })
+      .where(eq(sessions.id, session.id));
+
+    throw error;
+  } finally {
+    if (!locksTransferred) {
+      try {
+        await LockManager.releaseLocks(session.id);
+      } catch (releaseError) {
+        console.error("Failed to release locks after reviewPr", releaseError);
+      }
     }
   }
-
-  if (!remediationTriggered && session.remediationDepth < 3) {
-    await db
-      .update(sessions)
-      .set({
-        lastReviewedCommit: input.sha,
-        status: hasFailure ? "failed" : "completed",
-      })
-      .where(eq(sessions.id, session.id));
-  } else if (remediationTriggered) {
-    await db
-      .update(sessions)
-      .set({
-        lastReviewedCommit: input.sha,
-        status: "failed", // The current session failed, a new one was queued
-      })
-      .where(eq(sessions.id, session.id));
-  }
-
-  return {
-    outcome: "review_posted",
-    severity: reviewAnalysis.object.severity,
-    sessionId: session.id,
-    goalId: goal.id,
-    commentTarget: input.eventType === "pull_request" ? "pull_request" : "commit",
-    cascadeAnalysis: {
-      isCascade: cascadeResult.isCascade,
-      coreFilesChanged: cascadeResult.coreFilesChanged,
-      repairJobCount: cascadeResult.repairJobs.length,
-    },
-    remediationTriggered,
-    newSessionId,
-  };
 }
 
 /**

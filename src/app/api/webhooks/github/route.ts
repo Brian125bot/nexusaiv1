@@ -1,14 +1,14 @@
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { after } from "next/server";
 
 import { db } from "@/db";
-import { sessions, goals } from "@/db/schema";
-import { reviewWebhookEvent } from "@/lib/auditor/auto-reviewer";
+import { sessions } from "@/db/schema";
+import { autoRemediate } from "@/lib/auditor/cascade-engine";
+import { reviewPr, reviewWebhookEvent } from "@/lib/auditor/auto-reviewer";
 import { CORE_FILES, isCoreFile } from "@/lib/cascade-config";
 import { getRequiredEnv, verifyGitHubSignature } from "@/lib/github/webhook";
 import { LockManager } from "@/lib/registry/lock-manager";
-import { githubClient } from "@/lib/github/octokit";
 
 export const runtime = "nodejs";
 
@@ -34,6 +34,7 @@ const checkRunEventSchema = z.object({
       .nullable(),
     pull_requests: z.array(
       z.object({
+        number: z.number().int().positive().optional(),
         head: z.object({ ref: z.string() }),
       })
     ).optional(),
@@ -234,97 +235,58 @@ export async function POST(req: Request) {
       }
 
       const headSha = check_run.head_sha;
-
-      let session = await db.query.sessions.findFirst({
-        where: eq(sessions.lastReviewedCommit, headSha),
-      });
-
-      // fallback: try to find by branch if lastReviewedCommit doesn't match and pull request exists
       const branchName = check_run.pull_requests?.[0]?.head.ref;
+      const prNumber = check_run.pull_requests?.[0]?.number;
+
+      let session =
+        branchName
+          ? await db.query.sessions.findFirst({
+              where: and(
+                eq(sessions.branchName, branchName),
+                inArray(sessions.status, ["queued", "executing", "verifying"]),
+              ),
+              orderBy: [desc(sessions.createdAt)],
+            })
+          : undefined;
+
       if (!session && branchName) {
         session = await db.query.sessions.findFirst({
           where: eq(sessions.branchName, branchName),
+          orderBy: [desc(sessions.createdAt)],
         });
       }
 
       if (!session) {
-         return Response.json({ ignored: true, reason: "No active session found for commit" }, { status: 202 });
+        session = await db.query.sessions.findFirst({
+          where: and(
+            eq(sessions.lastReviewedCommit, headSha),
+            inArray(sessions.status, ["queued", "executing", "verifying"]),
+          ),
+          orderBy: [desc(sessions.createdAt)],
+        });
       }
 
-      if (["verifying", "completed", "failed"].includes(session.status)) {
+      if (!session) {
+        return Response.json({ ignored: true, reason: "No active session found for branch/commit" }, { status: 202 });
+      }
+
+      if (["completed", "failed"].includes(session.status)) {
         console.log(`[Webhook] Ignoring check_run: Session ${session.id} already in state ${session.status}`);
         return Response.json({ ignored: true, reason: `Session ${session.id} already in state ${session.status}` }, { status: 200 });
       }
 
-      if (check_run.conclusion === "failure" || check_run.conclusion === "timed_out") {
+      if (check_run.conclusion === "failure") {
         after(async () => {
           try {
-            // CI failed, fetch raw logs from GitHub Actions if possible
-            const rawLogs = await githubClient.getCheckRunLogs(
-              repository.owner.login,
-              repository.name,
-              check_run.id
-            );
-
-            const errorLogs = rawLogs || check_run.output?.text || check_run.output?.summary || "CI Build Failed";
-
-            // Mark session failed immediately
-            await db
-              .update(sessions)
-              .set({
-                status: "failed",
-                lastError: String(errorLogs).substring(0, 5000), // Ensure we capture more context if available
-              })
-              .where(eq(sessions.id, session.id));
-
-            if (session.remediationDepth >= 3) {
-              console.log(`🛑 Nexus: Maximum remediation depth reached for session ${session.id} after CI failure.`);
-              if (session.goalId) {
-                await db.update(goals)
-                  .set({ status: "drifted" })
-                  .where(eq(goals.id, session.goalId));
-              }
-              return; // Stop early
-            }
-
-
-            // Fetch the internal analyze endpoint directly via localhost since we are the server
-            // We use the triggerCascadeAnalyze pattern
-            const endpoint = new URL("/api/cascade/analyze", req.url);
-            const headers = new Headers({ "content-type": "application/json" });
-            const authHeader = req.headers.get("authorization");
-            const cookieHeader = req.headers.get("cookie");
-
-            if (authHeader) headers.set("authorization", authHeader);
-            if (cookieHeader) headers.set("cookie", cookieHeader);
-
-            // Pass the logs and session ID to the analyze route for Ouroboros remediation
-            const response = await fetch(endpoint.toString(), {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                type: "remediation",
-                sessionId: session.id,
-                logs: String(errorLogs)
-              }),
-            });
-
-            if (!response.ok) {
-              const body = await response.text();
-              throw new Error(`Failed to trigger auto-remediation: ${response.status} ${body}`);
-            }
-
-            // Keep the lastError updated for UI visibility
-            await db.update(sessions)
-              .set({ lastError: String(errorLogs).substring(0, 500) })
-              .where(eq(sessions.id, session.id));
-
+            const errorLogs = check_run.output?.text || check_run.output?.summary || "CI Build Failed";
+            await autoRemediate(session.id, String(errorLogs));
           } catch (err: unknown) {
             console.error("Error processing CI failure:", err);
             const errorMessage = err instanceof Error ? err.message : String(err);
             await db.update(sessions)
               .set({ status: "failed", lastError: errorMessage.substring(0, 5000) })
               .where(eq(sessions.id, session.id));
+            await LockManager.releaseLocks(session.id);
           }
         });
 
@@ -340,26 +302,25 @@ export async function POST(req: Request) {
            return Response.json({ ignored: true, reason: `check_run success ignored for non-primary pipeline: ${check_run.name}` }, { status: 200 });
         }
 
-        // CI succeeded, trigger semantic auditor
         await db
           .update(sessions)
           .set({ status: "verifying" })
           .where(eq(sessions.id, session.id));
 
-        console.log(`[Webhook] CI Signal Received: ${headSha} -> success. Updating Session ${session.id} to verifying.`);
+        console.log(`[Webhook] CI Signal Received: ${headSha} -> success. Running semantic review for Session ${session.id}.`);
 
         after(async () => {
           try {
-            await reviewWebhookEvent({
-              eventType: "push", // Treat as push to review latest sha
+            await reviewPr({
+              sessionId: session.id,
               owner: repository.owner.login,
               repo: repository.name,
               branch: branchName || session.branchName,
               sha: headSha,
+              prNumber,
             });
           } catch (err: unknown) {
             console.error("Auditor error:", err);
-            // CRITICAL: Prevent silent failure state
             const errorMessage = err instanceof Error ? err.message : String(err);
             await db.update(sessions)
               .set({ status: "failed", lastError: errorMessage.substring(0, 5000) })

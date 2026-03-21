@@ -282,6 +282,7 @@ export async function autoRemediate(sessionId: string, logs: string) {
   }
 
   if (session.remediationDepth >= 3) {
+    await LockManager.releaseLocks(session.id);
     throw new Error(`Max remediation depth reached (3) for session ${sessionId}`);
   }
 
@@ -373,6 +374,15 @@ export async function autoRemediate(sessionId: string, logs: string) {
 
     // Transfer locks
     await LockManager.transferLocks(session.id, newSessionId, tx);
+
+    await tx
+      .update(sessions)
+      .set({
+        status: "failed",
+        lastError: String(logs).substring(0, 5000),
+        lastSyncedAt: new Date(),
+      })
+      .where(eq(sessions.id, session.id));
   });
 
   try {

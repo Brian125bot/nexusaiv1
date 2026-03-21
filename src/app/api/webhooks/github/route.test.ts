@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const reviewWebhookEventMock = vi.fn();
+const reviewPrMock = vi.fn();
+const autoRemediateMock = vi.fn();
 const verifyGitHubSignatureMock = vi.fn();
 const getRequiredEnvMock = vi.fn();
 const fetchMock = vi.fn();
 
 vi.mock("@/lib/auditor/auto-reviewer", () => ({
   reviewWebhookEvent: (...args: unknown[]) => reviewWebhookEventMock(...args),
+  reviewPr: (...args: unknown[]) => reviewPrMock(...args),
+}));
+
+vi.mock("@/lib/auditor/cascade-engine", () => ({
+  autoRemediate: (...args: unknown[]) => autoRemediateMock(...args),
 }));
 
 vi.mock("@/lib/github/webhook", () => ({
@@ -27,6 +34,8 @@ describe("POST /api/webhooks/github", () => {
     verifyGitHubSignatureMock.mockReturnValue(true);
     getRequiredEnvMock.mockReturnValue("ok");
     reviewWebhookEventMock.mockResolvedValue({ outcome: "review_posted" });
+    reviewPrMock.mockResolvedValue({ outcome: "review_posted", decision: "approve" });
+    autoRemediateMock.mockResolvedValue({ success: true });
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,

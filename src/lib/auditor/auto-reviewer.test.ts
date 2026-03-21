@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const findFirstSessionMock = vi.fn();
+const releaseLocksMock = vi.fn();
 
 vi.mock("@/db", () => ({
   db: {
@@ -22,12 +23,22 @@ vi.mock("@/lib/github/octokit", () => ({
     getPullRequestDiff: vi.fn(),
     postPullRequestComment: vi.fn(),
     postCommitComment: vi.fn(),
+    findOpenPullRequestNumber: vi.fn(),
+    mergePullRequest: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/registry/lock-manager", () => ({
+  LockManager: {
+    releaseLocks: (...args: unknown[]) => releaseLocksMock(...args),
+    transferLocks: vi.fn(),
   },
 }));
 
 describe("reviewWebhookEvent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    releaseLocksMock.mockResolvedValue(undefined);
   });
 
   it("returns no_active_session when no active session matches branch/repo", async () => {
@@ -50,7 +61,17 @@ describe("reviewWebhookEvent", () => {
     findFirstSessionMock.mockResolvedValueOnce({
       id: "sess-1",
       goalId: "goal-1",
+      sourceRepo: "acme/nexus",
+      branchName: "feature/a",
+      status: "executing",
+    });
+    findFirstSessionMock.mockResolvedValueOnce({
+      id: "sess-1",
+      goalId: "goal-1",
       lastReviewedCommit: "abc123",
+      sourceRepo: "acme/nexus",
+      branchName: "feature/a",
+      status: "executing",
     });
 
     const { reviewWebhookEvent } = await import("@/lib/auditor/auto-reviewer");
@@ -68,5 +89,6 @@ describe("reviewWebhookEvent", () => {
       sessionId: "sess-1",
       goalId: "goal-1",
     });
+    expect(releaseLocksMock).toHaveBeenCalledWith("sess-1");
   });
 });
