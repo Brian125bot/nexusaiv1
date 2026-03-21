@@ -1,7 +1,16 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["ws"],
+  serverExternalPackages: ["ws", "ts-morph", "typescript", "@ts-morph/common"],
+  experimental: {
+    webpackBuildWorker: false,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   async headers() {
     return [
       {

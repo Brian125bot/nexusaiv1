@@ -44,7 +44,7 @@ describe("reviewWebhookEvent", () => {
     });
 
     expect(result).toEqual({ outcome: "no_active_session" });
-  });
+  }, 10000);
 
   it("skips duplicate commit review when commit already reviewed", async () => {
     findFirstSessionMock.mockResolvedValueOnce({

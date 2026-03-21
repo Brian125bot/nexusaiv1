@@ -27,6 +27,7 @@ export async function GET(req: Request) {
     const formattedCascades = recentCascades.map((cascade) => ({
       cascadeId: cascade.id,
       isCascade: true,
+      isAstVerified: cascade.isAstVerified,
       coreFilesChanged: cascade.coreFilesChanged,
       downstreamFiles: cascade.downstreamFiles,
       repairJobCount: cascade.repairJobCount,

@@ -50,7 +50,6 @@ export type CascadeAnalysisResult = {
 const cascadeAnalysisSchema = z.object({
   isCascade: z.boolean(),
   coreFilesChanged: z.array(z.string().min(1)),
-  downstreamFiles: z.array(z.string().min(1)),
   repairJobs: z.array(
     z.object({
       id: z.string().min(1),
@@ -69,7 +68,7 @@ const cascadeAnalysisSchema = z.object({
  */
 function buildCascadePrompt(
   coreFileChanges: FileChange[],
-  allChangedFiles: string[],
+  astDownstreamFiles: string[],
 ): string {
   const sections: string[] = [
     "You are the Nexus Lead Architect. A core system file has been modified.",
@@ -87,21 +86,20 @@ function buildCascadePrompt(
   }
 
   sections.push("");
-  sections.push("### All Changed Files in Commit");
-  sections.push(allChangedFiles.map(f => `- ${f}`).join("\n"));
+  sections.push("### Deterministic AST Downstream Files");
+  sections.push(astDownstreamFiles.length > 0 ? astDownstreamFiles.map((filePath) => `- ${filePath}`).join("\n") : "- (none)");
 
   sections.push("");
   sections.push("### Instructions");
-  sections.push("1. Identify which files in 'All Changed Files' import or depend on the core files");
-  sections.push("2. Group these downstream files into logical 'Repair Jobs'");
-  sections.push("3. Each Repair Job should be handleable by a separate AI agent");
-  sections.push("4. Ensure NO file appears in multiple repair jobs");
-  sections.push("5. For each job, provide a clear prompt describing what needs to be fixed");
+  sections.push("Here are the EXACT downstream files that are broken due to the core changes. Your ONLY job is to group these specific files into logical parallel Repair Jobs. Do not invent files.");
+  sections.push("1. Group only the provided downstream files into logical 'Repair Jobs'");
+  sections.push("2. Each Repair Job should be handleable by a separate AI agent");
+  sections.push("3. Ensure NO file appears in multiple repair jobs");
+  sections.push("4. For each job, provide a clear prompt describing what needs to be fixed");
   sections.push("");
   sections.push("### Output Requirements");
   sections.push("- isCascade: true if this change impacts multiple downstream files");
   sections.push("- coreFilesChanged: list of core files that were modified");
-  sections.push("- downstreamFiles: all files that need updates due to this change");
   sections.push("- repairJobs: array of discrete repair tasks (3-5 jobs ideal)");
   sections.push("- summary: brief explanation of the architectural change");
   sections.push("- confidence: your confidence in this analysis (0-1)");
@@ -114,6 +112,7 @@ function buildCascadePrompt(
  */
 export async function analyzeCascade(
   allChangedFiles: FileChange[],
+  astDownstreamFiles: string[],
 ): Promise<CascadeAnalysisResult> {
   // Identify which changed files are core files
   const coreFileChanges = allChangedFiles.filter(change =>
@@ -131,7 +130,16 @@ export async function analyzeCascade(
     };
   }
 
-  const allFilePaths = allChangedFiles.map(f => f.filePath);
+  if (astDownstreamFiles.length === 0) {
+    return {
+      isCascade: false,
+      coreFilesChanged: coreFileChanges.map((file) => file.filePath),
+      downstreamFiles: [],
+      repairJobs: [],
+      summary: "No downstream files detected by AST graph",
+      confidence: 1,
+    };
+  }
 
   try {
     const { object: analysis } = await generateObject({
@@ -139,7 +147,7 @@ export async function analyzeCascade(
       schema: cascadeAnalysisSchema,
       system:
         "You are the Nexus Lead Architect AI. Analyze code changes for blast radius impact. Be conservative - only flag true cascade scenarios.",
-      prompt: buildCascadePrompt(coreFileChanges, allFilePaths),
+      prompt: buildCascadePrompt(coreFileChanges, astDownstreamFiles),
       providerOptions: {
         google: {
           thinkingConfig: {
@@ -150,12 +158,21 @@ export async function analyzeCascade(
     });
 
     // Filter repair jobs by confidence and max parallel agents
-    const qualifiedJobs = analysis.repairJobs
+    const astDownstreamSet = new Set(astDownstreamFiles);
+    const constrainedJobs = analysis.repairJobs
+      .map((job) => ({
+        ...job,
+        files: Array.from(new Set(job.files.filter((filePath) => astDownstreamSet.has(filePath)))),
+      }))
+      .filter((job) => job.files.length > 0);
+
+    const qualifiedJobs = constrainedJobs
       .filter(() => analysis.confidence >= CASCADE_CONFIG.minConfidenceScore)
       .slice(0, CASCADE_CONFIG.maxParallelAgents);
 
     return {
       ...analysis,
+      downstreamFiles: astDownstreamFiles,
       repairJobs: qualifiedJobs,
     };
   } catch (error) {
@@ -163,7 +180,7 @@ export async function analyzeCascade(
     return {
       isCascade: false,
       coreFilesChanged: coreFileChanges.map(f => f.filePath),
-      downstreamFiles: [],
+      downstreamFiles: astDownstreamFiles,
       repairJobs: [],
       summary: `Cascade analysis failed: ${error instanceof Error ? error.message : "Unknown error"}`,
       confidence: 0,

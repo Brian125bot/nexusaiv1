@@ -3,7 +3,9 @@ import { GoalManager } from "./goal-manager";
 import { db } from "@/db";
 import { goals, type AcceptanceCriterion } from "@/db/schema";
 
-describe("GoalManager", () => {
+const describeDb = process.env.RUN_DB_INTEGRATION_TESTS === "true" ? describe : describe.skip;
+
+describeDb("GoalManager", () => {
   beforeAll(async () => {
     await db.delete(goals);
   });

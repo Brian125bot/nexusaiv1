@@ -8,7 +8,8 @@ import { db } from "@/db";
 import { goals, sessions, cascades, type AcceptanceCriterion } from "@/db/schema";
 import { aiEnv } from "@/lib/config";
 import { githubClient } from "@/lib/github/octokit";
-import { analyzeCascade, type FileChange } from "@/lib/auditor/cascade-engine";
+import { analyzeCascade, detectCoreFileChanges, type FileChange } from "@/lib/auditor/cascade-engine";
+import { findDownstreamDependents } from "@/lib/ast/dependency-graph";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 
@@ -161,6 +162,10 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
     diff: diff,
     status: "modified" as const,
   }));
+  const coreFilesChanged = detectCoreFileChanges(changedFiles);
+  const astDownstreamFiles = coreFilesChanged.length > 0
+    ? await findDownstreamDependents(coreFilesChanged)
+    : [];
 
   // Run cascade analysis in parallel with regular review
   const [reviewAnalysis, cascadeResult] = await Promise.all([
@@ -186,7 +191,7 @@ export async function reviewWebhookEvent(input: ReviewInput): Promise<ReviewResu
         },
       },
     }),
-    analyzeCascade(fileChanges),
+    analyzeCascade(fileChanges, astDownstreamFiles),
   ]);
 
   const assessment = reviewAnalysis.object.criteriaAssessment;

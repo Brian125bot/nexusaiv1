@@ -19,6 +19,8 @@ vi.mock("@/lib/cascade-config", () => ({
   isCoreFile: (filePath: string) => filePath.endsWith("/schema.ts"),
 }));
 
+const itDb = process.env.RUN_DB_INTEGRATION_TESTS === "true" ? it : it.skip;
+
 describe("POST /api/webhooks/github", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -156,7 +158,7 @@ describe("POST /api/webhooks/github", () => {
     expect(body.cascadeTrigger.triggered).toBe(true);
     expect(body.cascadeTrigger.coreFilesChanged).toEqual(["src/db/schema.ts"]);
   });
-  it("ignores check_run if session is already completed", async () => {
+  itDb("ignores check_run if session is already completed", async () => {
     const { POST } = await import("@/app/api/webhooks/github/route");
     const { db } = await import("@/db");
     const { sessions } = await import("@/db/schema");
@@ -202,7 +204,7 @@ describe("POST /api/webhooks/github", () => {
     expect(body.reason).toContain("already in state completed");
   });
 
-  it("handles primary check_run success correctly by starting verification", async () => {
+  itDb("handles primary check_run success correctly by starting verification", async () => {
     const { POST } = await import("@/app/api/webhooks/github/route");
     const { db } = await import("@/db");
     const { sessions } = await import("@/db/schema");
@@ -251,12 +253,10 @@ describe("POST /api/webhooks/github", () => {
     expect(session?.status).toBe("verifying");
   });
 
-  it("handles check_run failure correctly by failing session and remediation logic", async () => {
+  itDb("handles check_run failure correctly by failing session and remediation logic", async () => {
     const { POST } = await import("@/app/api/webhooks/github/route");
     const { db } = await import("@/db");
     const { sessions } = await import("@/db/schema");
-    const { eq } = await import("drizzle-orm");
-
     await db.insert(sessions).values({
       id: "session_to_fail",
       sourceRepo: "acme/repo",

@@ -1,5 +1,6 @@
-import { randomUUID } from "crypto";
+import * as crypto from "crypto";
 import { eq } from "drizzle-orm";
+import { Project } from "ts-morph";
 import { z } from "zod";
 
 import { db } from "@/db";
@@ -9,6 +10,8 @@ import {
   analyzeCascade,
   autoRemediate,
 } from "@/lib/auditor/cascade-engine";
+import { findDownstreamDependents } from "@/lib/ast/dependency-graph";
+import { isCoreFile } from "@/lib/cascade-config";
 import { julesClient } from "@/lib/jules/client";
 import { LockManager } from "@/lib/registry/lock-manager";
 import { cascadeRequestSchema, cascadeResponseSchema } from "@/lib/cascade/schemas";
@@ -74,7 +77,43 @@ export async function POST(req: Request) {
   try {
     // Step 1: Analyze the blast radius
     console.log(`🔍 Nexus: Analyzing cascade for ${cascadeId}`);
-    const analysis = await analyzeCascade(fileChanges);
+    const tempSessionId = "analyze-" + crypto.randomUUID();
+    const coreFilesChanged = fileChanges
+      .map((change) => change.filePath)
+      .filter((filePath) => isCoreFile(filePath));
+
+    let astDownstreamFiles: string[] = [];
+    try {
+      const project = new Project({
+        tsConfigFilePath: "tsconfig.json",
+      });
+      const trackedSourceFiles = project.getSourceFiles().map((sourceFile) => sourceFile.getFilePath());
+      const lockResult = await LockManager.acquireLocks(
+        tempSessionId,
+        trackedSourceFiles.map((filePath) => ({ filePath, type: "shared" as const })),
+      );
+
+      if (!lockResult.ok) {
+        return Response.json(
+          {
+            error: "Read lock conflicts detected during AST verification",
+            conflicts: lockResult.conflicts.map((conflict) => ({
+              filePath: conflict.filePath,
+              sessionId: conflict.sessionId,
+            })),
+            cascadeId,
+            isCascade: true,
+          },
+          { status: 409 },
+        );
+      }
+
+      astDownstreamFiles = await findDownstreamDependents(coreFilesChanged);
+    } finally {
+      await LockManager.releaseLocks(tempSessionId);
+    }
+
+    const analysis = await analyzeCascade(fileChanges, astDownstreamFiles);
 
     if (!analysis.isCascade) {
       return Response.json({
@@ -97,6 +136,7 @@ export async function POST(req: Request) {
       id: cascadeId,
       coreFilesChanged: analysis.coreFilesChanged,
       downstreamFiles: analysis.downstreamFiles,
+      isAstVerified: true,
       repairJobCount: analysis.repairJobs.length,
       summary: analysis.summary,
       status: "analyzing",
@@ -118,7 +158,7 @@ export async function POST(req: Request) {
               title: `Cascade Repair: ${analysis.coreFilesChanged.join(", ")}`,
               description: `Automated cascade repair triggered by commit ${commitSha.slice(0, 8)}`,
               acceptanceCriteria: analysis.repairJobs.map(job => ({
-                id: randomUUID(),
+                id: crypto.randomUUID(),
                 text: job.prompt,
                 met: false,
                 reasoning: null,

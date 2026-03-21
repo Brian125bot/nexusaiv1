@@ -9,8 +9,11 @@ const setMock = vi.fn();
 const whereMock = vi.fn();
 
 const acquireLocksMock = vi.fn();
+const releaseLocksMock = vi.fn();
 const analyzeCascadeMock = vi.fn();
 const createSessionMock = vi.fn();
+const findDownstreamDependentsMock = vi.fn();
+const getSourceFilesMock = vi.fn();
 
 const schema = {
   sessions: { table: "sessions" },
@@ -37,9 +40,22 @@ vi.mock("@/lib/auditor/cascade-engine", () => ({
   analyzeCascade: (...args: unknown[]) => analyzeCascadeMock(...args),
 }));
 
+vi.mock("@/lib/ast/dependency-graph", () => ({
+  findDownstreamDependents: (...args: unknown[]) => findDownstreamDependentsMock(...args),
+}));
+
+vi.mock("ts-morph", () => ({
+  Project: class {
+    getSourceFiles(...args: unknown[]) {
+      return getSourceFilesMock(...args);
+    }
+  },
+}));
+
 vi.mock("@/lib/registry/lock-manager", () => ({
   LockManager: {
     acquireLocks: (...args: unknown[]) => acquireLocksMock(...args),
+    releaseLocks: (...args: unknown[]) => releaseLocksMock(...args),
   },
 }));
 
@@ -83,7 +99,18 @@ describe("POST /api/cascade/analyze conflict handling", () => {
       confidence: 0.9,
     });
 
-    acquireLocksMock.mockResolvedValue({
+    getSourceFilesMock.mockReturnValue([
+      { getFilePath: () => "/repo/src/db/schema.ts" },
+      { getFilePath: () => "/repo/src/lib/a.ts" },
+    ]);
+    findDownstreamDependentsMock.mockResolvedValue(["src/lib/a.ts"]);
+    releaseLocksMock.mockResolvedValue(undefined);
+    acquireLocksMock
+      .mockResolvedValueOnce({
+        ok: true,
+        lockedFiles: ["/repo/src/db/schema.ts", "/repo/src/lib/a.ts"],
+      })
+      .mockResolvedValue({
       ok: false,
       reason: "conflict",
       conflicts: [{ filePath: "src/lib/a.ts", sessionId: "existing-session-1" }],
@@ -120,6 +147,19 @@ describe("POST /api/cascade/analyze conflict handling", () => {
       failedCount: 1,
     });
     expect(typeof body.telemetry.dispatchLatencyMs).toBe("number");
+    expect(acquireLocksMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^analyze-/),
+      [
+        { filePath: "/repo/src/db/schema.ts", type: "shared" },
+        { filePath: "/repo/src/lib/a.ts", type: "shared" },
+      ],
+    );
+    expect(findDownstreamDependentsMock).toHaveBeenCalledWith(["src/db/schema.ts"]);
+    expect(analyzeCascadeMock).toHaveBeenCalledWith(
+      [{ filePath: "src/db/schema.ts", diff: "diff", status: "modified" }],
+      ["src/lib/a.ts"],
+    );
+    expect(releaseLocksMock).toHaveBeenCalledWith(expect.stringMatching(/^analyze-/));
     expect(createSessionMock).not.toHaveBeenCalled();
   });
 });

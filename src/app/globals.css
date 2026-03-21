@@ -6,6 +6,8 @@
   --panel: #0b1627;
   --accent: #35d6c0;
   --danger: #ff7a8f;
+  --font-heading: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+  --font-ibm-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
 }
 
 @theme inline {
